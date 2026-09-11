@@ -205,7 +205,10 @@ cython_debug/
 .cursorindexingignore
 
 # Nuanced Screener local datasets (Parquet storage)
-# Keep `data/meta/` trackable (e.g. tickers.csv), but ignore large raw/derived outputs.
+# Keep `data/meta/` trackable (e.g. tickers.csv), but ignore large raw/derived outputs
+# and machine-local update stamps / sync logs.
+data/meta/update_state.json
+data/meta/logs/
 data/raw/
 data/raw_by_date/
 data/derived/

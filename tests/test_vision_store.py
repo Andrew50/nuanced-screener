@@ -67,8 +67,8 @@ def _png_artifact(cand, png: bytes = SYNTHETIC_PNG) -> ChartArtifact:
     )
 
 
-def _attempt(batch_id: str, cids: tuple[str, ...], *, accepted: bool = True) -> ClassificationAttempt:
-    now = datetime(2026, 6, 19, 16, 0, tzinfo=timezone.utc)
+def _attempt(batch_id: str, cids: tuple[str, ...], *, accepted: bool = True, at: datetime | None = None) -> ClassificationAttempt:
+    now = at or datetime(2026, 6, 19, 16, 0, tzinfo=timezone.utc)
     return ClassificationAttempt(
         attempt_id=f"att-{batch_id}",
         batch_id=batch_id,
@@ -320,6 +320,47 @@ def test_setup_aware_strength_sort_and_filter(tmp_path: Path) -> None:
     assert export.candidates[0]["adr_pct_20"] is None
     assert export.candidates[0]["adr_pct_20_unit"] == "fraction"
     assert export.flattening
+
+
+def test_arrival_sort_appends_later_commits(tmp_path: Path) -> None:
+    store, reader, _ = open_vision_scans(tmp_path)
+    flag = make_spec("flag")
+    flag_snap, _ = snapshot_pair(flag, [])
+    profile = sample_prepared_scan().profile
+    feats = feature_value_from_mapping({"close": 10.0, "dollar_vol_avg_20": 1.0, "adr_pct_20": None})
+    early = make_candidate_input(
+        ticker="EARLY", window=window_for("EARLY"), features=feats, eligible_setup_ids=("flag",), profile=profile
+    )
+    later = make_candidate_input(
+        ticker="LATER", window=window_for("LATER"), features=feats, eligible_setup_ids=("flag",), profile=profile
+    )
+    prepared = freeze_prepared_scan(
+        profile=profile,
+        setups=(flag_snap,),
+        examples=(),
+        candidates=(early, later),
+        config=sample_prepared_scan().config,
+        global_filters_yaml_bytes=b"",
+    )
+    run = store.create_run(prepared)
+    t0 = datetime(2026, 6, 19, 16, 0, tzinfo=timezone.utc)
+    t1 = datetime(2026, 6, 19, 16, 1, tzinfo=timezone.utc)
+    store.commit_batch(
+        run.run_id,
+        batch_id="first",
+        results=(_completed(early, (assessment("flag", "match", strength=1),), None),),
+        attempt=_attempt("first", (early.candidate_id,), at=t0),
+    )
+    store.commit_batch(
+        run.run_id,
+        batch_id="second",
+        results=(_completed(later, (assessment("flag", "match", strength=3),), None),),
+        attempt=_attempt("second", (later.candidate_id,), at=t1),
+    )
+    by_arrival = reader.query(ResultQuery(run_id=run.run_id, sort=SortSpec(key="arrival", descending=False)))
+    assert [r.ticker for r in by_arrival.items] == ["EARLY", "LATER"]
+    by_strength = reader.query(ResultQuery(run_id=run.run_id, sort=SortSpec(key="match_strength", descending=True)))
+    assert [r.ticker for r in by_strength.items] == ["LATER", "EARLY"]
 
 
 def test_pagination_neighbors_and_selection_rule(tmp_path: Path) -> None:

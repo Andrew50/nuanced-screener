@@ -13,9 +13,9 @@ pip install -e ".[dev,ui,vision]"
 cp .env.example .env
 ```
 
-- Base install (`pip install -e ".[dev]"`) keeps `ns setups`, `ns screen`, `ns models`, and `ns candidates` working without OpenAI, Streamlit, or matplotlib.
+- Base install (`pip install -e ".[dev]"`) keeps `ns setups`, `ns query`, `ns models`, and `ns candidates` working without OpenAI, Streamlit, or matplotlib.
 - `ui` extra: Streamlit + matplotlib (builder, results, `ns setups ui`, `ns vision view`).
-- `vision` extra: OpenAI SDK + matplotlib (headless `ns vision scan` without Streamlit).
+- `vision` extra: OpenAI SDK + matplotlib (headless `ns screen` / `ns vision scan` without Streamlit).
 - Installed wheels include `screener_loader/vision/response_schema.json`.
 
 `.env` placeholders only: `OPENAI_API_KEY`, `NS_VISION_MODEL`. A missing key refuses live scans. It never substitutes demo/fake predictions.
@@ -39,7 +39,7 @@ SMAs use **displayed bars only** (`min_periods=period`). There is no pre-display
 
 - Eligible candidates are the eligibility union intersected with `tickers.csv`. No `candidates.py` prefilter.
 - Bulk windows come from `last_100_bars.parquet`. Larger stored N is sliced to the profile lookback. If the file’s max `rn` is below lookback, fail with `ns rebuild-last100 --window-size N --repo-root <root>`. Isolated short or stale tickers are skipped, not silently shortened.
-- Freshness is latest-daily only: current UTC vs NYSE regular/early close, vs actual parquet/window dates. `EligibilityResult.asof_date` is a maximum, not proof. Globally stale or future snapshots fail. Isolated stale inputs skip. Reading saved results does not re-check freshness.
+- Freshness is latest-daily only: last-N must not be newer than the last closed NYSE session, and for live scans must not be older than the session delayed grouped-daily vendors authorize (previous session while “today” is still the calendar date). `EligibilityResult.asof_date` is a maximum, not proof. Globally stale or future snapshots fail. Isolated stale inputs skip. Reading saved results does not re-check freshness. Live `ns screen` auto-runs `ns update` when the update stamp is older than 24 hours.
 - Features: `close` (USD/share), `dollar_vol_avg_20` (USD/day), `adr_pct_20` (fraction; 0.04 = 4%). Pandas missing values become JSON null. Filter-rejection reasons are unavailable (`not_eligible` is membership, not a ledger).
 - Polygon OHLC are already adjusted at source. The adapter does not apply `adj_close` or adjust again. Unknown provenance is `"unknown"`; current config/mtime is not historical proof.
 
@@ -49,13 +49,13 @@ Scan root: `data/vision_scans/` (gitignored).
 
 ```bash
 # Dry-run: render, compile, estimate. Zero provider calls.
-ns vision scan --dry-run --repo-root .
+ns screen --dry-run --repo-root .
 
 # Labeled local classifier (explicit; not a missing-key fallback)
-ns vision scan --demo --max-candidates 5 --repo-root .
+ns screen --demo --max-candidates 5 --repo-root .
 
 # Live (requires OPENAI_API_KEY and an explicit model id)
-ns vision scan --model "$NS_VISION_MODEL" --max-candidates 3 --repo-root .
+ns screen --model "$NS_VISION_MODEL" --max-candidates 3 --repo-root .
 
 ns vision resume --run-id run-... --repo-root .
 ns vision runs --repo-root .
@@ -69,7 +69,10 @@ ns setups ui --port 8501 --repo-root .    # same app, default builder page
 
 ## UI
 
-`ns setups ui` and `ns vision view` share `screener_loader/ui/app.py`. Page config is set once. The builder keeps forms/catalog behavior; `python -m streamlit run src/screener_loader/ui/setup_builder.py` still works. Results read persisted runs only (no implicit rescan, rerender, or LLM calls). Launch scans from the CLI.
+`ns setups ui` and `ns vision view` share `screener_loader/ui/app.py`. Page config is set once. Sidebar switches **Setup builder** and **Results**.
+
+- Setup builder: YAML catalog, filters, examples. `python -m streamlit run src/screener_loader/ui/setup_builder.py` still works.
+- Results: browse persisted runs. **Run a scan** starts a background job; a progress strip and the candidate list refresh as each batch is committed (no implicit new scan on Refresh). Live still needs `OPENAI_API_KEY` and a model id; a missing key does not invent results. Uncapped / market-wide live scans stay on `ns screen` (`ns vision scan` is an alias).
 
 ## Reviews and evaluation
 

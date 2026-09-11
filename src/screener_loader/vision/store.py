@@ -50,6 +50,7 @@ from .types import (
     ChartArtifact,
     ChartProfile,
     ClassificationAttempt,
+    CompilerSnapshot,
     ExampleInput,
     FeatureValue,
     FilterSnapshot,
@@ -520,6 +521,90 @@ def decode_attempt(payload: Mapping[str, Any]) -> ClassificationAttempt:
     )
 
 
+def aggregate_attempt_usage(attempts: Sequence[ClassificationAttempt]) -> tuple[int, TokenUsage | None]:
+    """Count each provider attempt_id once, even if raw and validated forms were journaled."""
+
+    chosen: dict[str, ClassificationAttempt] = {}
+    order: list[str] = []
+    for attempt in attempts:
+        aid = attempt.attempt_id
+        if aid not in chosen:
+            chosen[aid] = attempt
+            order.append(aid)
+            continue
+        prev = chosen[aid]
+        if attempt.accepted and not prev.accepted:
+            chosen[aid] = attempt
+        elif prev.usage is None and attempt.usage is not None:
+            chosen[aid] = attempt
+    known = [chosen[aid].usage for aid in order if chosen[aid].usage is not None]
+    if not known:
+        return len(chosen), None
+    usage = TokenUsage(
+        input_tokens=sum(u.input_tokens or 0 for u in known) or None,
+        output_tokens=sum(u.output_tokens or 0 for u in known) or None,
+        total_tokens=sum(u.total_tokens or 0 for u in known) or None,
+    )
+    return len(chosen), usage
+
+
+def encode_compiler(snap: CompilerSnapshot | None) -> dict[str, Any] | None:
+    if snap is None:
+        return None
+    return {
+        "compiler_id": snap.compiler_id,
+        "instructions": snap.instructions,
+        "schema_name": snap.schema_name,
+        "json_schema": dict(snap.json_schema),
+        "fingerprint": snap.fingerprint,
+    }
+
+
+def decode_compiler(payload: Mapping[str, Any] | None) -> CompilerSnapshot | None:
+    if not payload:
+        return None
+    return CompilerSnapshot(
+        compiler_id=str(payload.get("compiler_id") or "snapshot_request_compiler_v1"),
+        instructions=str(payload.get("instructions") or ""),
+        schema_name=str(payload.get("schema_name") or ""),
+        json_schema=dict(payload.get("json_schema") or {}),
+        fingerprint=str(payload.get("fingerprint") or ""),
+    )
+
+
+def encode_skip(skip: InputSkip) -> dict[str, Any]:
+    return {
+        "ticker": skip.ticker,
+        "kind": skip.kind,
+        "message": skip.message,
+        "asof_date": skip.asof_date.isoformat() if skip.asof_date else None,
+        "bar_count": skip.bar_count,
+        "features": None if skip.features is None else encode_feature(skip.features),
+    }
+
+
+def decode_skip(payload: Mapping[str, Any]) -> InputSkip:
+    raw_feat = payload.get("features")
+    return InputSkip(
+        ticker=str(payload["ticker"]),
+        kind=payload["kind"],
+        message=str(payload.get("message") or ""),
+        asof_date=parse_date(payload["asof_date"]) if payload.get("asof_date") else None,
+        bar_count=payload.get("bar_count"),
+        features=decode_feature(raw_feat) if isinstance(raw_feat, Mapping) else None,
+    )
+
+
+def _result_write_action(prior: CandidateResult | None, row: CandidateResult) -> str:
+    if prior is None:
+        return "write"
+    if prior.status == "error":
+        return "write"
+    if result_content_digest(prior) == result_content_digest(row):
+        return "skip"
+    return "conflict"
+
+
 def encode_artifact_index_entry(ref: ArtifactRef, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
     payload = {
         "artifact_id": ref.artifact_id,
@@ -786,7 +871,8 @@ class FilesystemRunStore:
                 return
             for row in rows:
                 prior = self._read_result(directory, row.candidate_id)
-                if prior is not None and result_content_digest(prior) != result_content_digest(row):
+                action = _result_write_action(prior, row)
+                if action == "conflict":
                     raise VisionError(
                         f"candidate {row.candidate_id} already committed with different content"
                     )
@@ -802,11 +888,12 @@ class FilesystemRunStore:
         with self._thread_lock:
             for row in results:
                 prior = self._read_result(directory, row.candidate_id)
-                if prior is not None:
-                    if result_content_digest(prior) != result_content_digest(row):
-                        raise VisionError(
-                            f"candidate {row.candidate_id} already recorded with different content"
-                        )
+                action = _result_write_action(prior, row)
+                if action == "conflict":
+                    raise VisionError(
+                        f"candidate {row.candidate_id} already recorded with different content"
+                    )
+                if action == "skip":
                     continue
                 self._write_result(directory, row, source="mark", batch_id=None)
         self._rebuild_derived(run_id)
@@ -996,16 +1083,7 @@ class FilesystemRunStore:
             "setups": setups_payload,
             "examples": examples_payload,
             "candidates": candidates_payload,
-            "skips": [
-                {
-                    "ticker": s.ticker,
-                    "kind": s.kind,
-                    "message": s.message,
-                    "asof_date": s.asof_date.isoformat() if s.asof_date else None,
-                    "bar_count": s.bar_count,
-                }
-                for s in prepared.skips
-            ],
+            "skips": [encode_skip(s) for s in prepared.skips],
             "config": encode_config(prepared.config),
             "diagnostics": encode_diagnostics(prepared.diagnostics),
             "prepared_at": format_dt(prepared.prepared_at),
@@ -1013,6 +1091,7 @@ class FilesystemRunStore:
             "raw_digest": prepared.raw_digest,
             "global_filters_rel": gf_rel,
             "global_filters_raw_digest": prepared.global_filters_raw_digest,
+            "compiler": encode_compiler(prepared.compiler),
         }
         yaml_dir.mkdir(parents=True, exist_ok=True)
         windows_dir.mkdir(parents=True, exist_ok=True)
@@ -1098,16 +1177,7 @@ class FilesystemRunStore:
                     profile=decode_profile(raw["profile"]),
                 )
             )
-        skips = tuple(
-            InputSkip(
-                ticker=str(s["ticker"]),
-                kind=s["kind"],
-                message=str(s.get("message") or ""),
-                asof_date=parse_date(s["asof_date"]) if s.get("asof_date") else None,
-                bar_count=s.get("bar_count"),
-            )
-            for s in envelope.get("skips") or ()
-        )
+        skips = tuple(decode_skip(s) for s in envelope.get("skips") or ())
         gf_bytes = safe_join(directory, envelope["global_filters_rel"]).read_bytes()
         return PreparedScan(
             profile=decode_profile(envelope["profile"]),
@@ -1122,6 +1192,7 @@ class FilesystemRunStore:
             raw_digest=str(envelope["raw_digest"]),
             global_filters_yaml_bytes=gf_bytes,
             global_filters_raw_digest=str(envelope["global_filters_raw_digest"]),
+            compiler=decode_compiler(envelope.get("compiler")),
         )
 
     def _write_meta(self, directory: Path, stored: StoredRun, summary: RunSummary | None) -> None:
@@ -1266,14 +1337,7 @@ class FilesystemRunStore:
         rows = [decode_candidate_result(read_json(p)) for p in iter_json_files(directory / "results")]
         artifacts = self._read_artifact_index(directory)
         attempts = [decode_attempt(read_json(p)) for p in iter_json_files(directory / "attempts")]
-        usage = None
-        known = [a.usage for a in attempts if a.usage is not None]
-        if known:
-            usage = TokenUsage(
-                input_tokens=sum(u.input_tokens or 0 for u in known) or None,
-                output_tokens=sum(u.output_tokens or 0 for u in known) or None,
-                total_tokens=sum(u.total_tokens or 0 for u in known) or None,
-            )
+        attempt_count, usage = aggregate_attempt_usage(attempts)
         manifest = {
             "run_id": run_id,
             "schema_version": SCHEMA_VERSION,
@@ -1286,7 +1350,7 @@ class FilesystemRunStore:
             "mode": stored.config.mode,
             "synthetic": stored.synthetic,
             "usage": encode_usage(usage),
-            "attempts": len(attempts),
+            "attempts": attempt_count,
             "artifacts": [
                 {
                     "artifact_id": e.get("artifact_id"),

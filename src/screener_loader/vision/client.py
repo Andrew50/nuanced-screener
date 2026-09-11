@@ -52,24 +52,43 @@ def _usage_from(response: Any) -> TokenUsage | None:
     )
 
 
-def _collect_output_text(response: Any) -> tuple[str | None, tuple[str, ...]]:
+def _collect_refusals(response: Any) -> tuple[str, ...]:
     refusals: list[str] = []
-    texts: list[str] = []
-    direct = getattr(response, "output_text", None)
-    if isinstance(direct, str) and direct.strip():
-        texts.append(direct)
     for item in getattr(response, "output", None) or []:
         itype = getattr(item, "type", None)
         if itype == "refusal":
             refusals.append(str(getattr(item, "refusal", None) or item))
         for part in getattr(item, "content", None) or []:
-            ptype = getattr(part, "type", None)
-            if ptype == "refusal":
+            if getattr(part, "type", None) == "refusal":
                 refusals.append(str(getattr(part, "refusal", None) or part))
-            elif ptype in {"output_text", "text"}:
+    return tuple(refusals)
+
+
+def _text_from_output_blocks(response: Any) -> str | None:
+    texts: list[str] = []
+    for item in getattr(response, "output", None) or []:
+        for part in getattr(item, "content", None) or []:
+            ptype = getattr(part, "type", None)
+            if ptype in {"output_text", "text"}:
                 texts.append(str(getattr(part, "text", "") or ""))
-    text = "".join(texts).strip() or None
-    return text, tuple(refusals)
+    joined = "".join(texts).strip()
+    return joined or None
+
+
+def _collect_output_text(response: Any) -> tuple[str | None, tuple[str, ...]]:
+    """Read provider text exactly once.
+
+    The official SDK ``Response.output_text`` already concatenates ``output_text``
+    blocks. Concatenating that property *and* the underlying blocks duplicates
+    valid JSON and fails validation. Prefer ``output_text`` when it is non-empty;
+    otherwise fall back to walking output blocks (for mocks and older shapes).
+    """
+
+    refusals = _collect_refusals(response)
+    direct = getattr(response, "output_text", None)
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip(), refusals
+    return _text_from_output_blocks(response), refusals
 
 
 def _sanitize_json(text: str) -> Mapping[str, Any] | None:

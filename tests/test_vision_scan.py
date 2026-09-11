@@ -78,11 +78,16 @@ def test_vision_scan_dry_run_makes_zero_classifier_calls() -> None:
     prepared = sample_prepared_scan(mode="dry_run")
     clf = FakeClassifier()
     compiler = FakeCompiler()
-    out = _scanner(classifier=clf, compiler=compiler).run(prepared)
+    store = InMemoryRunStore()
+    out = _scanner(classifier=clf, compiler=compiler, store=store).run(prepared)
     assert out.status == "dry_run"
     assert clf.calls == 0
     assert compiler.calls >= 1
     assert out.summary.synthetic is False or prepared.config.mode == "dry_run"
+    rows = store.list_candidate_results(out.run_id)
+    assert rows and all(r.status == "completed" for r in rows)
+    assert all(r.artifact_id for r in rows)
+    assert all(not r.assessments for r in rows)
 
 
 def test_vision_scan_partial_failure_retry_and_oversize_split() -> None:

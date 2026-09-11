@@ -9,6 +9,8 @@ from threading import RLock
 from typing import Any, Callable, Sequence
 from uuid import uuid4
 import logging
+import random as random_mod
+import time
 
 from .batching import retry_delay_seconds, sort_candidates, split_candidates
 from .protocols import CancelFlag
@@ -97,8 +99,8 @@ class Scanner:
         self.compiler = compiler
         self.classifier = classifier
         self.store = store
-        self._sleep = sleep or (lambda _s: None)
-        self._random = random or (lambda: 0.0)
+        self._sleep = time.sleep if sleep is None else sleep
+        self._random = random_mod.random if random is None else random
         self.peak_in_flight = 0
         self._in_flight = 0
         self._write_lock = RLock()
@@ -147,6 +149,47 @@ class Scanner:
                 raise VisionError(f"Candidate {cand.candidate_id} has no eligible setups")
             if cand.source_digest != cand.window.source_digest:
                 raise VisionError(f"Candidate {cand.candidate_id} source digest drifted from its window")
+        self._preflight_request_limits(prepared)
+
+    def _preflight_request_limits(self, prepared: PreparedScan) -> None:
+        from .prompts import estimate_output_tokens
+
+        if not prepared.candidates:
+            return
+        config = prepared.config
+        ref_counts: dict[str, int] = {}
+        for ex in prepared.examples:
+            ref_counts[ex.setup_id] = ref_counts.get(ex.setup_id, 0) + 1
+        ref_total = sum(ref_counts.values())
+        limit = int(config.max_images_per_request)
+        detail = ", ".join(f"{sid}={n} example(s)" for sid, n in sorted(ref_counts.items())) or "none"
+        if ref_total > limit:
+            raise OversizeRequestError(
+                f"Reference images alone are {ref_total} ({detail}); "
+                f"max_images_per_request={limit}. Reduce examples or raise the limit. "
+                "Splitting candidates cannot fix this."
+            )
+        if ref_total + 1 > limit:
+            raise OversizeRequestError(
+                f"Reference images are {ref_total} ({detail}), leaving no room for a candidate chart "
+                f"under max_images_per_request={limit}."
+            )
+        for cand in prepared.candidates:
+            est = estimate_output_tokens(len(cand.eligible_setup_ids))
+            if est > int(config.max_output_tokens):
+                raise OversizeRequestError(
+                    f"Candidate {cand.candidate_id} alone is estimated at {est} output tokens, "
+                    f"exceeding max_output_tokens={config.max_output_tokens}. "
+                    "Raise the cap or reduce eligible setups; splitting cannot help."
+                )
+
+    def _request_compiler(self, prepared: PreparedScan):
+        from .prompts import SnapshotRequestCompiler
+
+        snap = prepared.compiler
+        if snap is not None and isinstance(self.compiler, SnapshotRequestCompiler):
+            return SnapshotRequestCompiler.from_snapshot(snap)
+        return self.compiler
 
     def _execute(self, run_id: str, prepared: PreparedScan, cancel: CancelFlag | None) -> ScanOutcome:
         self._usages = []
@@ -165,14 +208,14 @@ class Scanner:
         committed = {
             r.candidate_id
             for r in self.store.list_candidate_results(run_id)
-            if r.status in {"completed", "error", "skipped"}
+            if r.status in {"completed", "skipped"}
         }
         pending = [c for c in sort_candidates(prepared.candidates) if c.candidate_id not in committed]
         if _cancelled(cancel):
             return self._finalize(run_id, prepared, status="cancelled", synthetic=synthetic)
 
         if not pending:
-            status = "dry_run" if dry else "completed"
+            status = "dry_run" if dry else self._status_from_store(run_id, prepared)
             return self._finalize(run_id, prepared, status=status, synthetic=synthetic)
 
         try:
@@ -257,7 +300,7 @@ class Scanner:
             committed = {
                 r.candidate_id
                 for r in self.store.list_candidate_results(run_id)
-                if r.status in {"completed", "error", "skipped"}
+                if r.status in {"completed", "skipped"}
             }
         work = tuple(c for c in batch if c.candidate_id not in committed)
         if not work:
@@ -297,7 +340,7 @@ class Scanner:
         ok_arts = tuple(a for _, a in rendered)
         batch_id = f"batch-{uuid4().hex[:10]}"
         try:
-            request = self.compiler.compile(
+            request = self._request_compiler(prepared).compile(
                 setups=prepared.setups,
                 example_artifacts=example_artifacts,
                 examples=prepared.examples,
@@ -321,6 +364,7 @@ class Scanner:
         if dry:
             attempt = self._dry_attempt(request)
             self._journal(run_id, attempt)
+            self._record_dry_charts(run_id, tuple(zip(ok_cands, ok_arts, strict=True)), attempt)
             return
 
         if _cancelled(cancel):
@@ -440,10 +484,6 @@ class Scanner:
     def _record_skips(self, run_id: str, prepared: PreparedScan) -> None:
         if not prepared.skips:
             return
-        fallback_date = prepared.candidates[0].asof_date if prepared.candidates else date(1970, 1, 1)
-        fallback_features = (
-            prepared.candidates[0].features if prepared.candidates else FeatureValue(None, None, None)
-        )
         rows = []
         for skip in prepared.skips:
             rows.append(
@@ -451,8 +491,8 @@ class Scanner:
                     candidate_id=f"skip:{skip.ticker}:{skip.kind}",
                     status="skipped",
                     ticker=skip.ticker,
-                    asof_date=skip.asof_date or fallback_date,
-                    features=fallback_features,
+                    asof_date=skip.asof_date or date(1970, 1, 1),
+                    features=skip.features if skip.features is not None else FeatureValue(None, None, None),
                     eligible_setup_ids=(),
                     assessments=(),
                     artifact_id=None,
@@ -461,6 +501,31 @@ class Scanner:
                     source_digest="",
                 )
             )
+        with self._write_lock:
+            self.store.mark_candidates(run_id, rows)
+
+    def _record_dry_charts(
+        self,
+        run_id: str,
+        rendered: Sequence[tuple[CandidateInput, ChartArtifact]],
+        attempt: ClassificationAttempt,
+    ) -> None:
+        rows = [
+            CandidateResult(
+                candidate_id=cand.candidate_id,
+                status="completed",
+                ticker=cand.ticker,
+                asof_date=cand.asof_date,
+                features=cand.features,
+                eligible_setup_ids=cand.eligible_setup_ids,
+                assessments=(),
+                artifact_id=art.artifact_id,
+                error=None,
+                attempt_id=attempt.attempt_id,
+                source_digest=cand.source_digest,
+            )
+            for cand, art in rendered
+        ]
         with self._write_lock:
             self.store.mark_candidates(run_id, rows)
 
@@ -517,6 +582,19 @@ class Scanner:
     def _journal(self, run_id: str, attempt: ClassificationAttempt) -> None:
         with self._write_lock:
             self.store.journal_attempt(run_id, attempt)
+
+    def _stored_attempts(self, run_id: str) -> tuple[ClassificationAttempt, ...]:
+        if hasattr(self.store, "list_attempts"):
+            return tuple(self.store.list_attempts(run_id))
+        attempts = getattr(self.store, "attempts", None)
+        if isinstance(attempts, dict):
+            return tuple(attempts.get(run_id, ()))
+        return ()
+
+    def _aggregate_usage(self, run_id: str) -> tuple[int, TokenUsage | None]:
+        from .store import aggregate_attempt_usage
+
+        return aggregate_attempt_usage(self._stored_attempts(run_id))
 
     def _dry_attempt(self, request: CompiledRequest) -> ClassificationAttempt:
         now = datetime.now(timezone.utc)
@@ -590,21 +668,27 @@ class Scanner:
         rows = self.store.list_candidate_results(run_id)
         real_ids = {c.candidate_id for c in prepared.candidates}
         real = [r for r in rows if r.candidate_id in real_ids]
-        skipped_extra = [r for r in rows if r.candidate_id not in real_ids]
+        skipped_ids = {r.candidate_id for r in rows if r.status == "skipped"}
         completed = sum(1 for r in real if r.status == "completed")
         errors = sum(1 for r in real if r.status == "error")
-        skipped = sum(1 for r in real if r.status == "skipped") + len(skipped_extra)
-        pending = max(0, len(prepared.candidates) - completed - errors - sum(1 for r in real if r.status == "skipped"))
+        skipped = len(skipped_ids)
+        pending = 0
+        by_id = {r.candidate_id: r for r in real}
+        for cand in prepared.candidates:
+            row = by_id.get(cand.candidate_id)
+            if row is None or row.status == "pending":
+                pending += 1
         matches = sum(sum(1 for a in r.assessments if a.verdict == "match") for r in real)
+        attempts, usage = self._aggregate_usage(run_id)
         summary = RunSummary(
-            candidates_total=len(prepared.candidates),
+            candidates_total=len(prepared.candidates) + len(prepared.skips),
             candidates_completed=completed,
             candidates_error=errors,
             candidates_skipped=skipped,
             candidates_pending=pending,
             setup_matches=matches,
-            attempts=len(self.store.attempts.get(run_id, [])) if hasattr(self.store, "attempts") else self._attempts,
-            usage=_sum_usage(self._usages),
+            attempts=attempts,
+            usage=usage,
             status=status,  # type: ignore[arg-type]
             synthetic=synthetic,
         )

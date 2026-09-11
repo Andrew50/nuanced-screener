@@ -357,12 +357,17 @@ def freeze_prepared_scan(
     skips: Sequence[InputSkip] = (),
     global_filters_yaml_bytes: bytes = b"",
     prepared_at: datetime | None = None,
+    compiler=None,
 ) -> PreparedScan:
     setups_t = tuple(setups)
     examples_t = tuple(examples)
     candidates_t = tuple(candidates)
     skips_t = tuple(skips)
     at = prepared_at or datetime.now(timezone.utc)
+    if compiler is None:
+        from .prompts import SnapshotRequestCompiler
+
+        compiler = SnapshotRequestCompiler().snapshot()
     semantic = digest(
         {
             "profile": profile,
@@ -398,6 +403,7 @@ def freeze_prepared_scan(
                 "image_detail": config.image_detail,
                 "mode": config.mode,
             },
+            "compiler": compiler.fingerprint if compiler is not None else None,
             "diagnostics": diagnostics or ScanDiagnostics(),
         }
     )
@@ -422,6 +428,7 @@ def freeze_prepared_scan(
         raw_digest=raw,
         global_filters_yaml_bytes=bytes(global_filters_yaml_bytes),
         global_filters_raw_digest=digest_bytes(bytes(global_filters_yaml_bytes)),
+        compiler=compiler,
     )
 
 

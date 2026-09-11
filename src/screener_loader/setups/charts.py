@@ -21,7 +21,15 @@ def load_ohlcv_window(
     ticker: str,
     asof_date: date,
     lookback_bars: int,
+    *,
+    mask_asof_to_open_only: bool = True,
 ) -> pd.DataFrame:
+    """Load lookback bars ending on asof_date.
+
+    Morning-screen default: if the last row is the as-of session, keep only its
+    open (premarket). High/low/close/volume of that bar are not known yet.
+    Prior completed sessions stay intact.
+    """
     ticker_u = str(ticker).strip().upper()
     lookback = int(lookback_bars)
     if lookback < 2:
@@ -35,18 +43,55 @@ def load_ohlcv_window(
         if files:
             df = _read_files(con, files, ticker_u, asof_date)
             if not df.empty:
-                return df.tail(lookback).reset_index(drop=True)
+                return _finalize_window(df, lookback, asof_date, mask_asof_to_open_only)
 
     raw = config.paths.raw_ticker_parquet(ticker_u)
     if raw.exists():
         df = _read_files(con, [raw], ticker_u, asof_date)
         if not df.empty:
-            return df.tail(lookback).reset_index(drop=True)
+            return _finalize_window(df, lookback, asof_date, mask_asof_to_open_only)
 
     raise FileNotFoundError(
         f"No OHLCV found for {ticker_u} ending {asof_date.isoformat()}. "
         "Run `ns update` or provide per-ticker parquet."
     )
+
+
+def mask_asof_bar_to_open_only(df: pd.DataFrame, asof_date: date) -> pd.DataFrame:
+    """Replace the as-of session with a plottable open-only stub.
+
+    Charts cannot render NULLs, so high/low/close equal open and volume is 0.
+    No-op when the last row is an earlier completed session (weekend/holiday).
+    """
+    if df is None or len(df) == 0:
+        return df
+    work = df.copy()
+    last_idx = work.index[-1]
+    last_date = _as_date(work.loc[last_idx, "date"])
+    if last_date != asof_date:
+        return work
+    open_px = pd.to_numeric(work.loc[last_idx, "open"], errors="coerce")
+    if pd.isna(open_px) or not math.isfinite(float(open_px)):
+        raise ValueError(f"as-of bar {asof_date.isoformat()} is missing a finite open")
+    open_f = float(open_px)
+    work.loc[last_idx, "high"] = open_f
+    work.loc[last_idx, "low"] = open_f
+    work.loc[last_idx, "close"] = open_f
+    if "volume" in work.columns:
+        work.loc[last_idx, "volume"] = 0.0
+    return work
+
+
+def _finalize_window(
+    df: pd.DataFrame,
+    lookback: int,
+    asof_date: date,
+    mask_asof_to_open_only: bool,
+) -> pd.DataFrame:
+    sliced = df.tail(lookback).reset_index(drop=True)
+    if mask_asof_to_open_only:
+        return mask_asof_bar_to_open_only(sliced, asof_date)
+    return sliced
 
 
 def render_chart_png(

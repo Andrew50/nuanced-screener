@@ -137,3 +137,24 @@ def test_create_slugs_name_and_avoids_collision(tmp_path: Path) -> None:
     assert a.name == "Episodic Pivot"
     assert b.id == "episodic_pivot_2"
     assert b.name == "Episodic Pivot"
+
+
+def test_flag_catalog_examples_are_screenshot_charts() -> None:
+    from screener_loader.paths import DataPaths
+    from screener_loader.setups.store import load_examples, load_setup
+
+    paths = DataPaths(Path(__file__).resolve().parents[1])
+    spec = load_setup(paths, "flag")
+    examples = load_examples(paths, "flag")
+    assert spec.name == "Bull Flag"
+    by_id = {e.id: e for e in examples}
+    assert by_id["gotu_chart"].quality == "canonical"
+    assert by_id["hlx_chart"].quality == "canonical"
+    assert by_id["meli_chart"].quality == "canonical"
+    assert by_id["mara_chart"].quality == "edge_case"
+    assert all(e.polarity == "positive" and e.type == "image" for e in examples)
+    for ex in examples:
+        dest = paths.setups_dir / "flag" / str(ex.path)
+        assert dest.is_file()
+        assert dest.stat().st_size > 1000
+

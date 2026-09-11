@@ -42,6 +42,7 @@ from .snapshots import (
     snapshot_setup,
 )
 from .types import (
+    COMPILER_ID,
     DEFAULT_LOOKBACK_BARS,
     DEFAULT_MOVING_AVERAGES,
     LOOKBACK_BARS_MIN,
@@ -64,6 +65,7 @@ from .types import (
     ClassificationAttempt,
     ClassificationError,
     CompiledRequest,
+    CompilerSnapshot,
     ExampleInput,
     FeatureValue,
     FilterSnapshot,
@@ -99,6 +101,7 @@ from .types import (
 )
 
 __all__ = [
+    "COMPILER_ID",
     "DEFAULT_LOOKBACK_BARS",
     "DEFAULT_MOVING_AVERAGES",
     "LOOKBACK_BARS_MIN",
@@ -124,6 +127,7 @@ __all__ = [
     "ClassificationError",
     "Classifier",
     "CompiledRequest",
+    "CompilerSnapshot",
     "ExampleInput",
     "FeatureValue",
     "FilterSnapshot",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 import csv
@@ -16,6 +17,8 @@ from rich.table import Table
 
 from .common import _config
 from .root import app
+from ..update import update_market_data
+from ..update_state import DEFAULT_STALE_AFTER, ensure_fresh_market_data, is_update_fresh, load_update_state
 
 vision_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(vision_app, name="vision")
@@ -71,24 +74,49 @@ def _scan_config(
     )
 
 
-@vision_app.command("scan")
-def vision_scan(
-    repo_root: Path = typer.Option(Path("."), "--repo-root"),
-    model: Optional[str] = typer.Option(None, "--model", envvar="NS_VISION_MODEL"),
-    mode: str = typer.Option("live", "--mode", help="live | dry_run | demo"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Render/compile/estimate only. Zero provider calls."),
-    demo: bool = typer.Option(False, "--demo", help="Explicit labeled local classifier. Not a missing-key fallback."),
-    max_candidates: Optional[int] = typer.Option(
-        None,
-        "--max-candidates",
-        help="Optional cap for smoke tests. Applied after eligibility, before freeze.",
-    ),
-    timeout_seconds: float = typer.Option(60.0, "--timeout-seconds"),
-    batch_size: int = typer.Option(10, "--batch-size"),
-    max_output_tokens: int = typer.Option(4096, "--max-output-tokens"),
+def _maybe_refresh_market_data(
+    cfg,
+    *,
+    skip_update: bool,
+    mode: str,
+    stale_after_hours: float,
 ) -> None:
-    """Prepare eligible charts and classify them. Scans are launched from the CLI, not the UI."""
+    """Run ``ns update`` when the stamp is stale. Last-N rebuild is update's job, not screen's."""
 
+    if skip_update or str(mode) != "live":
+        return
+    max_age = timedelta(hours=float(stale_after_hours))
+    state = load_update_state(cfg.paths)
+    if is_update_fresh(state, max_age=max_age):
+        assert state is not None
+        print(
+            f"[green]Data is fresh[/green] last update {state.finished_at.isoformat()} "
+            f"(newest={state.newest_partition})"
+        )
+        return
+    reason = (
+        "no update stamp"
+        if state is None
+        else f"last update {state.finished_at.isoformat()} is older than {stale_after_hours:g}h"
+    )
+    print(f"[yellow]Data is stale[/yellow] ({reason}); running update")
+    ensure_fresh_market_data(cfg, updater=update_market_data, max_age=max_age)
+
+
+def _run_vision_screen(
+    *,
+    repo_root: Path,
+    model: str | None,
+    mode: str,
+    dry_run: bool,
+    demo: bool,
+    max_candidates: int | None,
+    timeout_seconds: float,
+    batch_size: int,
+    max_output_tokens: int,
+    skip_update: bool,
+    stale_after_hours: float,
+) -> None:
     chosen = str(mode).strip().lower()
     if dry_run and demo:
         raise typer.BadParameter("Use only one of --dry-run or --demo")
@@ -111,6 +139,12 @@ def vision_scan(
     from screener_loader.vision.service import VisionApp
 
     cfg = _config(repo_root=repo_root)
+    _maybe_refresh_market_data(
+        cfg,
+        skip_update=skip_update,
+        mode=chosen,
+        stale_after_hours=stale_after_hours,
+    )
     services = VisionApp(cfg, max_candidates=max_candidates)
     scan_config = _scan_config(
         model=model_id,
@@ -134,6 +168,92 @@ def vision_scan(
         f"synthetic={outcome.summary.synthetic}"
     )
     print(f"scan root: {services.scan_root}")
+
+
+@app.command("screen")
+def screen(
+    repo_root: Path = typer.Option(Path("."), "--repo-root"),
+    model: Optional[str] = typer.Option(None, "--model", envvar="NS_VISION_MODEL"),
+    mode: str = typer.Option("live", "--mode", help="live | dry_run | demo"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Render/compile/estimate only. Zero provider calls."),
+    demo: bool = typer.Option(False, "--demo", help="Explicit labeled local classifier. Not a missing-key fallback."),
+    max_candidates: Optional[int] = typer.Option(
+        None,
+        "--max-candidates",
+        help="Optional cap for smoke tests. Applied after eligibility, before freeze.",
+    ),
+    timeout_seconds: float = typer.Option(60.0, "--timeout-seconds"),
+    batch_size: int = typer.Option(10, "--batch-size"),
+    max_output_tokens: int = typer.Option(4096, "--max-output-tokens"),
+    skip_update: bool = typer.Option(
+        False,
+        "--skip-update",
+        help="Do not auto-run `ns update` when last-N is older than --stale-after-hours (live only).",
+    ),
+    stale_after_hours: float = typer.Option(
+        DEFAULT_STALE_AFTER.total_seconds() / 3600.0,
+        "--stale-after-hours",
+        help="Treat market data as stale if the update stamp is older than this.",
+    ),
+) -> None:
+    """LLM chart-setup screen over last-N bars. Alias: `ns vision scan`."""
+
+    _run_vision_screen(
+        repo_root=repo_root,
+        model=model,
+        mode=mode,
+        dry_run=dry_run,
+        demo=demo,
+        max_candidates=max_candidates,
+        timeout_seconds=timeout_seconds,
+        batch_size=batch_size,
+        max_output_tokens=max_output_tokens,
+        skip_update=skip_update,
+        stale_after_hours=stale_after_hours,
+    )
+
+
+@vision_app.command("scan")
+def vision_scan(
+    repo_root: Path = typer.Option(Path("."), "--repo-root"),
+    model: Optional[str] = typer.Option(None, "--model", envvar="NS_VISION_MODEL"),
+    mode: str = typer.Option("live", "--mode", help="live | dry_run | demo"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Render/compile/estimate only. Zero provider calls."),
+    demo: bool = typer.Option(False, "--demo", help="Explicit labeled local classifier. Not a missing-key fallback."),
+    max_candidates: Optional[int] = typer.Option(
+        None,
+        "--max-candidates",
+        help="Optional cap for smoke tests. Applied after eligibility, before freeze.",
+    ),
+    timeout_seconds: float = typer.Option(60.0, "--timeout-seconds"),
+    batch_size: int = typer.Option(10, "--batch-size"),
+    max_output_tokens: int = typer.Option(4096, "--max-output-tokens"),
+    skip_update: bool = typer.Option(
+        False,
+        "--skip-update",
+        help="Do not auto-run `ns update` when last-N is older than --stale-after-hours (live only).",
+    ),
+    stale_after_hours: float = typer.Option(
+        DEFAULT_STALE_AFTER.total_seconds() / 3600.0,
+        "--stale-after-hours",
+        help="Treat market data as stale if the update stamp is older than this.",
+    ),
+) -> None:
+    """Alias for `ns screen` (LLM chart-setup pipeline)."""
+
+    _run_vision_screen(
+        repo_root=repo_root,
+        model=model,
+        mode=mode,
+        dry_run=dry_run,
+        demo=demo,
+        max_candidates=max_candidates,
+        timeout_seconds=timeout_seconds,
+        batch_size=batch_size,
+        max_output_tokens=max_output_tokens,
+        skip_update=skip_update,
+        stale_after_hours=stale_after_hours,
+    )
 
 
 @vision_app.command("resume")

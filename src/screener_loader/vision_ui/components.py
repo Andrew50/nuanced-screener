@@ -17,6 +17,7 @@ from screener_loader.vision.types import (
 
 STATE_PREFIX = "vr_"
 DEFAULT_PAGE_SIZE = 10
+UI_LIST_PAGE_SIZE = 10_000
 
 VIEW_MATCHES = "matches"
 VIEW_ALL = "all"
@@ -45,6 +46,17 @@ def state_key(name: str) -> str:
     if name == "setup_id":
         raise ValueError("results UI must not use the builder setup_id key")
     return STATE_PREFIX + name
+
+
+def review_widget_keys(run_id: str, candidate_id: str, setup_id: str) -> tuple[str, str, str]:
+    """Run-scoped review widget keys so switching runs cannot leak judgments/notes."""
+
+    suffix = f"{run_id}_{candidate_id}_{setup_id}"
+    return (
+        state_key(f"judgment_{suffix}"),
+        state_key(f"note_{suffix}"),
+        state_key(f"save_{suffix}"),
+    )
 
 
 def reconcile_selected_candidate(selected_id: str | None, ordered_ids: Sequence[str]) -> str | None:
@@ -114,6 +126,13 @@ def format_dollar_volume(value: float | None) -> str:
     if value is None:
         return "—"
     return f"${value:,.0f}/day"
+
+
+def format_dollar_vol_millions(value: float | None) -> str:
+    if value is None:
+        return "—"
+    millions = float(value) / 1_000_000.0
+    return f"${millions:,.1f}M"
 
 
 def format_adr_pct(fraction: float | None) -> str:

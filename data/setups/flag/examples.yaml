@@ -1,1 +1,41 @@
-examples: []
+examples:
+- id: hlx_chart
+  polarity: positive
+  type: image
+  quality: canonical
+  note: HLX daily flag. Drawn break line is annotation only; candidate charts will
+    not have it.
+  timeframe: 1d
+  ticker: null
+  date: null
+  path: examples/hlx_chart.png
+- id: mara_chart
+  polarity: positive
+  type: image
+  quality: edge_case
+  note: 'MARA daily. Edge: brief coil after a huge momentum pole. Drawn lines are
+    annotation only.'
+  timeframe: 1d
+  ticker: null
+  date: null
+  path: examples/mara_chart.png
+- id: meli_chart
+  polarity: positive
+  type: image
+  quality: canonical
+  note: MELI daily flag. Drawn break line is annotation only; candidate charts will
+    not have it.
+  timeframe: 1d
+  ticker: null
+  date: null
+  path: examples/meli_chart.png
+- id: gotu_chart
+  polarity: positive
+  type: image
+  quality: canonical
+  note: GOTU daily high-tight flag. Drawn break line is annotation only; candidate
+    charts will not have it.
+  timeframe: 1d
+  ticker: null
+  date: null
+  path: examples/gotu_chart.png

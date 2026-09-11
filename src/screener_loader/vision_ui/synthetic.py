@@ -558,7 +558,7 @@ def seed_synthetic_runs(scan_root: Path) -> tuple[FilesystemRunStore, Filesystem
     store.finalize(
         run.run_id,
         RunSummary(
-            candidates_total=len(main.candidates),
+            candidates_total=len(main.candidates) + 2,
             candidates_completed=len(main.candidates) - 2,
             candidates_error=2,
             candidates_skipped=2,

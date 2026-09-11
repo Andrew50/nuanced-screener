@@ -11,7 +11,7 @@ Started from foundation `54afa5bc258be6e80d1be3c22f43254a61c8386a` plus Agent 1 
 | `DemoClassifier` | `vision.adapters.demo` | Explicit `mode=demo` only |
 | `VisionApp` | `vision.service` | Source + renderer + compiler + store + scanner |
 | `evaluate_run` / `evaluate_from_stores` | `vision.evaluate` | Offline multilabel counts |
-| `ns vision {scan,resume,runs,export,evaluate,view}` | `cli.vision` | Lazy optional imports |
+| `ns screen` / `ns vision {scan,resume,runs,export,evaluate,view}` | `cli.vision` | Lazy optional imports |
 | `ui.app:main` | `ui/app.py` | Shared Streamlit shell |
 
 Scan root: `<repo>/data/vision_scans/` via `vision_scan_root` (does not edit `paths.py`).
@@ -39,7 +39,7 @@ pytest -q
 
 - `OpenAIClassifier.get_image` is bound to the active run via `_RunAwareStore`.
 - Demo classifiers are built with `DemoClassifier.covering(prepared)` so mixed eligibility does not emit extra setups.
-- `ns setups ui` now launches the shared app on the builder page; `ns vision view` selects Results (`NS_VISION_PAGE`, `NS_VISION_RUN_ID`).
+- `ns setups ui` now launches the shared app on the builder page; `ns vision view` selects Results (`NS_VISION_PAGE`, `NS_VISION_RUN_ID`). Results includes an explicit scan expander; `render_results_page` stays read-only.
 - Production never falls back to `DemoClassifier` or `seed_synthetic_runs` when the API key is missing.
 
 ## Limitations

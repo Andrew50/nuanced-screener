@@ -85,6 +85,11 @@ class DataPaths:
         return self.meta_dir / "ticker_state.parquet"
 
     @property
+    def update_state_json(self) -> Path:
+        """Atomic stamp written at the end of a successful `ns update` run."""
+        return self.meta_dir / "update_state.json"
+
+    @property
     def symbol_map_csv(self) -> Path:
         return self.meta_dir / "symbol_map.csv"
 
@@ -99,6 +104,10 @@ class DataPaths:
     @property
     def last_100_bars_parquet(self) -> Path:
         return self.derived_dir / "last_100_bars.parquet"
+
+    @property
+    def last_100_bars_manifest_json(self) -> Path:
+        return self.derived_dir / "last_100_bars.manifest.json"
 
     @property
     def windowed_bars_parquet(self) -> Path:

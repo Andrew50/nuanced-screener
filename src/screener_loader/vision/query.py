@@ -456,7 +456,27 @@ class FilesystemResultReader:
             if q.review_state not in {"any", None} and row.review_state != q.review_state:
                 continue
             scored.append((sort_strength, row))
-        return _sort_rows(scored, q.sort)
+        ranks = self._arrival_ranks(q.run_id) if q.sort.key == "arrival" else {}
+        return _sort_rows(scored, q.sort, arrival_ranks=ranks)
+
+    def _arrival_ranks(self, run_id: str) -> dict[str, int]:
+        """Stable order of first appearance in accepted/journaled attempts (earliest first)."""
+
+        ranks: dict[str, int] = {}
+        seq = 0
+        attempts = list(self.store.list_attempts(run_id))
+        attempts.sort(
+            key=lambda a: (
+                (a.ended_at or a.started_at).isoformat() if (a.ended_at or a.started_at) else "",
+                a.attempt_id,
+            )
+        )
+        for attempt in attempts:
+            for cid in attempt.candidate_ids:
+                if cid not in ranks:
+                    ranks[cid] = seq
+                    seq += 1
+        return ranks
 
     def _all_rows(
         self,
@@ -553,7 +573,12 @@ def _latest_among(recs: Sequence[ReviewRecord]) -> ReviewRecord | None:
     return sorted(recs, key=lambda r: (r.created_at, r.review_id))[-1]
 
 
-def _sort_rows(scored: list[tuple[int | None, CandidateRow]], spec: SortSpec) -> list[CandidateRow]:
+def _sort_rows(
+    scored: list[tuple[int | None, CandidateRow]],
+    spec: SortSpec,
+    *,
+    arrival_ranks: dict[str, int] | None = None,
+) -> list[CandidateRow]:
     items = list(scored)
     items.sort(key=lambda item: item[1].candidate_id)
     if spec.key == "match_strength":
@@ -567,6 +592,13 @@ def _sort_rows(scored: list[tuple[int | None, CandidateRow]], spec: SortSpec) ->
         items.sort(key=lambda item: item[1].asof_date.isoformat(), reverse=spec.descending)
     elif spec.key == "candidate_id" and spec.descending:
         items.sort(key=lambda item: item[1].candidate_id, reverse=True)
+    elif spec.key == "arrival":
+        ranks = arrival_ranks or {}
+        missing = 10**12
+        items.sort(
+            key=lambda item: (ranks.get(item[1].candidate_id, missing), item[1].candidate_id),
+            reverse=spec.descending,
+        )
     return [row for _, row in items]
 
 

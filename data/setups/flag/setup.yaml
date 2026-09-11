@@ -1,14 +1,64 @@
 id: flag
-name: Flag
+name: Bull Flag
 enabled: true
 timeframe: 1d
 lookback_bars: 100
-description: ''
+description: |
+  Bull flag: a distinct impulse (the pole) followed by a contracting flag that is still
+  intact and ready to break. Evaluate at the morning of the last bar (session open /
+  premarket only). Match formed flags, including brief or early coils after a fast
+  momentum pole. Do not require the breakout, and do not match names that have already
+  broken out.
 criteria:
-  required: []
-  preferred: []
-  disqualifiers: []
-llm_notes: ''
+  required:
+    - >-
+      A visually obvious impulse (the pole) versus the prior base. The pole is typically
+      large enough that price spent much of it above the rising 10 and 20 MAs, but closes
+      below those MAs during the pole do not fail this rule.
+    - >-
+      After the pole peak, a flag has formed: pullback and/or sideways coil with
+      contraction in range/volatility versus the pole, plus a recognizable flag, pennant,
+      or shelf shape (descending, flat, or slight drift). After the first pullback,
+      structure is constructive (higher lows or a holding shelf), not a cascade of lower
+      lows. A random pause or dump without contraction and shape is not enough. Deep
+      retraces of the pole are allowed if later action contracts into a flag.
+    - >-
+      The flag looks formed and ready, but need not be textbook. Typical duration is
+      about 8–50 bars after the peak. Brief flags well under 8 bars still count when the
+      pole was extremely fast, as long as some contraction and flag shape are visible.
+    - >-
+      Price is still inside the flag. It has not broken out through the flag highs /
+      descending resistance into a new expansion. Infer that break line from the flag's
+      swing highs; candidate charts will not have it drawn.
+  preferred:
+    - Volume in the flag is quieter than during the pole (dry-up).
+    - A tight day, or last few completed bars with compressed range, near the right edge (not the as-of open stub).
+    - Higher lows after the initial post-peak pullback are obvious and orderly.
+    - The 10 MA is still above the 20 MA, and both are rising or flattening under the flag rather than rolling over hard.
+    - Price is holding near the 10/20 area during the coil (common, not required).
+  disqualifiers:
+    - 'Already broken out: recent bars have cleared the flag highs and a new expansion is underway.'
+    - No distinct pole — grind, chop, or a modest bounce without a real expansion versus the prior base.
+    - Post-peak action is a wide messy range or trend failure (expanding down, accepting new lows) with no contraction or flag shape.
+    - The pause has gone so long or so sloppy that the pole is no longer the dominant structure (typically well beyond ~50 bars, or a full round-trip of the pole).
+    - Bear flags, or charts whose dominant structure is a breakdown rather than a bullish coil.
+llm_notes: |
+  Bull flags only. Daily bars; duration counts are in daily bars.
+  Decision time is the morning of the last bar: that bar shows only the session open
+  (premarket). High, low, close, and volume of the last bar are unknown (plotted as an
+  open-only stub). Completed prior bars are fully visible. Do not read the last bar as a
+  finished candle, a tight day, or a breakout. Reference example dates are break mornings.
+  SMA 10/20/50 are plotted. 10 and 20 are setup context (was the pole significant?); 50 is
+  background. Do not require price to stay above any MA during the pole or the flag.
+  Hand-drawn trendlines on reference examples are annotation only. Infer the break line
+  from the flag highs.
+  Bias slightly toward recall: match early/messy but formed flags (brief coil after a huge
+  pole, no tight day, imperfect shape) at match_strength 1. Do not match junk — every
+  post-pole dip without contraction and flag shape is no_match.
+  match_strength 2: clear pole + contraction + flag shape, still inside. 3: textbook
+  (volume dry-up, tight day, clean higher lows, coiled under the highs).
+  If a required rule is clearly broken, no_match. If required evidence is not visible,
+  uncertain — do not guess no_match.
 filters:
   min_price: null
   min_dollar_vol_20d: null

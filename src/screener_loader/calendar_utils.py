@@ -1,7 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+
+EXCHANGE_TIMEZONES = {
+    "NYSE": "America/New_York",
+    "NASDAQ": "America/New_York",
+    "XNYS": "America/New_York",
+    "XNAS": "America/New_York",
+}
 
 
 @dataclass(frozen=True)
@@ -57,6 +66,15 @@ def subtract_years(d: date, years: int) -> date:
         return d - timedelta(days=365 * years)
 
 
+def calendar_local_date(now: datetime, calendar_name: str = "NYSE") -> date:
+    """Exchange-local calendar date. Do not use UTC ``date()`` — that rolls at 20:00 ET."""
+
+    tz_name = EXCHANGE_TIMEZONES.get(str(calendar_name).upper(), "America/New_York")
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(ZoneInfo(tz_name)).date()
+
+
 def latest_trading_day_on_or_before(today: date, cal: TradingCalendar) -> date:
     # Find the latest trading day <= today using a small lookback window.
     # We use a 10-day range to cover weekends + holidays.
@@ -65,6 +83,25 @@ def latest_trading_day_on_or_before(today: date, cal: TradingCalendar) -> date:
     if not days:
         raise RuntimeError("Could not determine latest trading day (calendar returned empty)")
     return days[-1]
+
+
+def latest_authorized_daily_session(
+    today: date,
+    cal: TradingCalendar,
+    *,
+    skip_same_calendar_day: bool = True,
+) -> date:
+    """Latest session Polygon grouped-daily will authorize.
+
+    Delayed plans reject same-calendar-day aggregates ("today's data before
+    end of day"), so when ``today`` is a trading day we use the previous session.
+    """
+    end = latest_trading_day_on_or_before(today, cal)
+    if skip_same_calendar_day and end == today:
+        window = cal.valid_trading_days(today - timedelta(days=10), today)
+        if len(window) >= 2:
+            return window[-2]
+    return end
 
 
 def last_n_trading_days_ending_at(day: date, n: int, cal: TradingCalendar) -> list[date]:

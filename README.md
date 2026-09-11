@@ -16,7 +16,7 @@ Vendors write local Parquet partitions. DuckDB reads those files for market-wide
 
 - Leakage-aware windows via `WindowedBuildSpec.mask_current_day_to_open_only` (decision at day-open; only `open` retained on the as-of bar)
 - Shared window builder for training and inference so information regimes stay aligned
-- Parquet-backed local storage with DuckDB named screens (`ns screen`)
+- Parquet-backed local storage with DuckDB named queries (`ns query`)
 - Swappable OHLCV vendors: Polygon grouped-daily (default), Stooq, Yahoo Finance
 - HTTP retries and per-host rate limiting
 - Masked TCN self-supervised pretrain → classifier finetune
@@ -84,7 +84,8 @@ ns --help
 ns universe --exclude-test-issues --include-exchanges NASDAQ NYSE AMEX
 ns update --ohlcv-vendor polygon_grouped --lookback-years 2 --calls-per-minute 5
 ns rebuild-last100 --window-size 100
-ns screen --query top_momentum_21d --limit 50
+ns screen --dry-run
+ns query --query top_momentum_21d --limit 50
 ```
 
 Classical train / scan (needs local OHLCV for labeled tickers):
@@ -104,9 +105,11 @@ ns models train --labels-csv labels.csv --model-type ssl_tcn_classifier --setup 
   --window-size 96 --encoder-dir data/models/ssl_tcn_masked_pretrain/_pretrain/<RUN_ID>
 ```
 
-Use `ns models --help`, `ns candidates --help`, `ns weak --help`, `ns setups --help`, and `ns vision --help` for the full surface. `--setup` filters must match values present in `labels.csv` (for example `F`), not the separate heuristic names used by weak-supervision helpers.
+Use `ns models --help`, `ns candidates --help`, `ns weak --help`, `ns setups --help`, `ns screen --help`, and `ns vision --help` for the full surface. `--setup` filters must match values present in `labels.csv` (for example `F`), not the separate heuristic names used by weak-supervision helpers.
 
-Vision chart classification (YAML setups → last-N charts → optional Responses API) is documented in [docs/VISION_MVP.md](docs/VISION_MVP.md). `ns setups ui` and `ns vision view` share one Streamlit app. Scans are launched from `ns vision scan` (`--dry-run` / `--demo` / explicit `--model`). Storage is `data/vision_scans/`. Live scans need `OPENAI_API_KEY` and `NS_VISION_MODEL`; a missing key does not invent results.
+`ns screen` is the LLM chart-setup pipeline (alias: `ns vision scan`). Live screens auto-run `ns update` when `data/meta/update_state.json` is missing or older than 24 hours (`--skip-update` to disable). `ns models scan` remains the trained-model scorer. Named DuckDB queries are `ns query`.
+
+Vision chart classification (YAML setups → last-N charts → optional Responses API) is documented in [docs/VISION_MVP.md](docs/VISION_MVP.md). `ns setups ui` and `ns vision view` share one Streamlit app (builder vs Results). Results can launch an explicit capped scan (dry-run / demo / live); the list live-updates as batches commit. Storage is `data/vision_scans/`. Live scans need `OPENAI_API_KEY` and `NS_VISION_MODEL`; a missing key does not invent results.
 
 ## Testing
 

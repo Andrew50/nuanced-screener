@@ -55,6 +55,17 @@ def expected_completed_session(now: datetime, *, calendar_name: str = "NYSE") ->
     return completed[-1]
 
 
+def authorized_daily_session(now: datetime, *, calendar_name: str = "NYSE") -> date:
+    """Latest session grouped-daily vendors will serve (never same-calendar-day)."""
+
+    from ...calendar_utils import TradingCalendar, calendar_local_date, latest_authorized_daily_session
+
+    now_utc = as_utc(now)
+    cal = TradingCalendar(calendar_name)
+    today = calendar_local_date(now_utc, calendar_name)
+    return latest_authorized_daily_session(today, cal, skip_same_calendar_day=True)
+
+
 def _close_utc(value: object) -> datetime:
     import pandas as pd
 
@@ -131,6 +142,25 @@ def assert_dataset_freshness(
     ``EligibilityResult.asof_date`` is a maximum over eligible rows and is not used here.
     """
 
+    resolve_scan_session(mode="live", expected=expected, max_row_date=max_row_date)
+
+
+def resolve_scan_session(
+    *,
+    mode: str,
+    expected: date,
+    max_row_date: date | None,
+    authorized: date | None = None,
+) -> date:
+    """Session the scan should chart through.
+
+    ``expected`` is the latest session that has closed. ``authorized`` is the
+    latest session delayed grouped-daily vendors will serve (previous session
+    while ``expected`` is still calendar-today). Live accepts last-N dates in
+    ``[authorized, expected]``. Dry-run and demo also allow an older snapshot.
+    """
+
+    floor = authorized if authorized is not None else expected
     if max_row_date is None:
         raise StaleSnapshotError(
             f"Derived last-N snapshot has no dates; expected completed session {expected.isoformat()}"
@@ -140,8 +170,12 @@ def assert_dataset_freshness(
             f"Derived last-N snapshot contains future session {max_row_date.isoformat()} "
             f"(expected completed session {expected.isoformat()})"
         )
-    if max_row_date < expected:
+    if max_row_date < floor:
+        if str(mode) in {"dry_run", "demo"}:
+            return max_row_date
         raise StaleSnapshotError(
             f"Derived last-N snapshot is stale: latest session {max_row_date.isoformat()} "
-            f"but expected completed session {expected.isoformat()}"
+            f"but expected completed session {expected.isoformat()} "
+            f"(authorized daily {floor.isoformat()})"
         )
+    return max_row_date

@@ -125,7 +125,13 @@ class VisionApp:
             store=bound_store,
         )
 
-    def run(self, config: ScanConfig, *, cancel: CancelFlag | None = None) -> ScanOutcome:
+    def run(
+        self,
+        config: ScanConfig,
+        *,
+        cancel: CancelFlag | None = None,
+        on_run_created: Callable[[str], None] | None = None,
+    ) -> ScanOutcome:
         if config.mode == "live" and self._classifier_override is None:
             require_explicit_live_model(config.model)
             key = self._api_key if self._api_key is not None else os.environ.get("OPENAI_API_KEY")
@@ -135,7 +141,9 @@ class VisionApp:
                     "Use --dry-run or --demo for offline checks."
                 )
         prepared = self.prepare(config)
-        return self.scanner_for(config, prepared=prepared).run(prepared, cancel=cancel)
+        scanner = self.scanner_for(config, prepared=prepared)
+        self._bind_run_created(scanner, on_run_created)
+        return scanner.run(prepared, cancel=cancel)
 
     def resume(
         self,
@@ -143,6 +151,24 @@ class VisionApp:
         prepared: PreparedScan | None = None,
         *,
         cancel: CancelFlag | None = None,
+        on_run_created: Callable[[str], None] | None = None,
     ) -> ScanOutcome:
+        if on_run_created is not None:
+            on_run_created(str(run_id))
         frozen = self.store.load_frozen_inputs(run_id)
-        return self.scanner_for(frozen.config, prepared=frozen).resume(run_id, prepared, cancel=cancel)
+        scanner = self.scanner_for(frozen.config, prepared=frozen)
+        self._bind_run_created(scanner, on_run_created)
+        return scanner.resume(run_id, prepared, cancel=cancel)
+
+    @staticmethod
+    def _bind_run_created(scanner: Any, on_run_created: Callable[[str], None] | None) -> None:
+        if on_run_created is None:
+            return
+        original = scanner.store.create_run
+
+        def create_run(prepared: PreparedScan):
+            stored = original(prepared)
+            on_run_created(str(stored.run_id))
+            return stored
+
+        scanner.store.create_run = create_run  # type: ignore[method-assign]

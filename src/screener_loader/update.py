@@ -4,7 +4,7 @@ import json
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -21,15 +21,15 @@ from rich.progress import (
 )
 
 from .config import LoaderConfig
-from .calendar_utils import TradingCalendar, latest_trading_day_on_or_before, subtract_years
-from .derived import rebuild_last_n_bars, rebuild_last_n_bars_from_polygon_date_partitions
+from .calendar_utils import TradingCalendar, calendar_local_date, latest_authorized_daily_session, subtract_years
+from .derived import ensure_last_n_bars
 from .http_client import configure_host_rate_limit
 from .paths import ensure_dirs
 from .raw_update import TickerResult, merge_write_ticker_parquet, plan_task_for_ticker
 from .universe import build_universe, load_universe
+from .update_state import write_update_state
 from .vendors.registry import get_ohlcv_vendor
 from .vendors.polygon_grouped import PolygonGroupedDailyVendor, require_polygon_api_key
-from zoneinfo import ZoneInfo
 
 
 def _chunked(items: list, n: int) -> Iterable[list]:
@@ -142,7 +142,8 @@ def _update_market_data_per_ticker(config: LoaderConfig) -> None:
 
     if not tasks:
         print("[green]No tickers need updating[/green]")
-        rebuild_last_n_bars(config)
+        ensure_last_n_bars(config)
+        write_update_state(config.paths, vendor=str(config.ohlcv_vendor), started_at=datetime.now(timezone.utc))
         return
 
     print(f"[cyan]Planning[/cyan] {len(tasks)} ticker updates (batch_size={config.batch_size}, {config.executor}={config.processes})")
@@ -205,8 +206,15 @@ def _update_market_data_per_ticker(config: LoaderConfig) -> None:
     _write_ticker_state(config, results)
     _write_run_log(config, results)
 
-    print("[cyan]Rebuilding derived last-N dataset[/cyan]")
-    rebuild_last_n_bars(config)
+    print("[cyan]Refreshing derived last-N cache[/cyan]")
+    ensure_last_n_bars(config)
+    write_update_state(
+        config.paths,
+        vendor=str(config.ohlcv_vendor),
+        dates_updated=[r.ticker for r in results if r.status == "updated"],
+        dates_failed=[r.ticker for r in results if r.status == "failed"],
+        ok=not any(r.status == "failed" for r in results) or not config.fail_fast,
+    )
 
 
 def _plan_polygon_dates(
@@ -216,23 +224,7 @@ def _plan_polygon_dates(
     existing_partitions: set[date],
     now_utc: datetime | None = None,
 ) -> list[date]:
-    end = latest_trading_day_on_or_before(today, cal)
-
-    # If today is a trading day, Polygon's grouped-daily data is often not available
-    # until after the close (and some delay). When running intraday, prefer the most
-    # recent *completed* trading day instead of "today".
-    if now_utc is not None and end == today:
-        try:
-            now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
-            # Conservative: treat data as "ready" after 20:00 ET.
-            if now_et.time() < dtime(20, 0):
-                # Find previous trading day (second-to-last in a small window).
-                window = cal.valid_trading_days(today - timedelta(days=10), today)
-                if len(window) >= 2:
-                    end = window[-2]
-        except Exception:
-            # If timezone/calendar logic fails, fall back to the calendar-derived `end`.
-            pass
+    end = latest_authorized_daily_session(today, cal, skip_same_calendar_day=now_utc is not None)
 
     start = subtract_years(end, config.lookback_years)
     trading_days = cal.valid_trading_days(start, end)
@@ -243,16 +235,16 @@ def _plan_polygon_dates(
     existing_in_window = existing_partitions & trading_set
     missing_in_window = trading_set - existing_partitions
 
-    # Required ordering per user spec:
+    # Required ordering:
     # 1) Fetch the most recent trading day first, always (overwrite if it exists).
     # 2) Then fetch days that have never been loaded (missing), newest -> oldest.
-    # 3) Then re-fetch days already loaded on previous runs (existing), newest -> oldest.
+    # 3) Then re-fetch already-loaded days, newest -> oldest.
+    #    Daily runs only refresh `refresh_tail_days` (default 3) so cron stays cheap.
+    #    `--full-refresh` re-pulls every existing partition in the lookback window.
     #
     # Notes:
     # - We never delete partitions. Anything outside the lookback window is left intact
     #   (and cannot be re-fetched here anyway).
-    # - `refresh_tail_days` is intentionally not used for Polygon partition planning:
-    #   the ordering is driven by the spec above.
     ordered: list[date] = []
 
     # Phase 1: latest day always.
@@ -263,7 +255,13 @@ def _plan_polygon_dates(
         ordered.append(d)
 
     # Phase 3: already-loaded days in window, newest -> oldest.
-    for d in sorted(existing_in_window, reverse=True):
+    existing_sorted = sorted(existing_in_window, reverse=True)
+    if config.full_refresh:
+        to_refresh = existing_sorted
+    else:
+        n = max(0, int(config.refresh_tail_days))
+        to_refresh = existing_sorted[:n]
+    for d in to_refresh:
         ordered.append(d)
 
     # Deduplicate while preserving order (latest may also be missing/existing).
@@ -285,18 +283,31 @@ def _update_market_data_polygon_grouped(config: LoaderConfig) -> None:
     configure_host_rate_limit("api.polygon.io", calls_per_minute=int(config.calls_per_minute))
 
     cal = TradingCalendar("NYSE")
-    today = date.today()
     now_utc = datetime.now(timezone.utc)
+    today = calendar_local_date(now_utc)
 
     existing = set(config.paths.list_polygon_grouped_daily_partitions().keys())
     planned_dates = _plan_polygon_dates(config=config, cal=cal, today=today, existing_partitions=existing, now_utc=now_utc)
     if not planned_dates:
         print("[yellow]No trading dates planned[/yellow]")
+        ensure_last_n_bars(config)
+        newest = max(existing) if existing else None
+        write_update_state(
+            config.paths,
+            vendor=str(config.ohlcv_vendor),
+            started_at=now_utc,
+            newest_partition=newest,
+        )
+        print(f"[green]Update stamp[/green] {config.paths.update_state_json}")
         return
 
+    refresh_note = (
+        "full_refresh" if config.full_refresh else f"refresh_tail_days={config.refresh_tail_days}"
+    )
     print(
         f"[cyan]Planning[/cyan] {len(planned_dates)} trading-day fetches "
-        f"(lookback_years={config.lookback_years}, calls_per_minute={config.calls_per_minute})"
+        f"(lookback_years={config.lookback_years}, {refresh_note}, "
+        f"calls_per_minute={config.calls_per_minute})"
     )
 
     vendor = PolygonGroupedDailyVendor()
@@ -304,6 +315,9 @@ def _update_market_data_polygon_grouped(config: LoaderConfig) -> None:
 
     completed = 0
     fetched_paths: list[Path] = []
+    dates_updated: list[str] = []
+    dates_failed: list[str] = []
+    dates_no_data: list[str] = []
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -352,6 +366,7 @@ def _update_market_data_polygon_grouped(config: LoaderConfig) -> None:
                 if df is None or df.empty:
                     # Don't create empty partitions; just record progress.
                     print(f"[dim]NO_DATA[/dim] {d.isoformat()}")
+                    dates_no_data.append(d.isoformat())
                 else:
                     tmp_path.parent.mkdir(parents=True, exist_ok=True)
                     df.to_parquet(tmp_path, index=False)
@@ -359,6 +374,7 @@ def _update_market_data_polygon_grouped(config: LoaderConfig) -> None:
 
                     atomic_replace(tmp_path, out_path)
                     fetched_paths.append(out_path)
+                    dates_updated.append(d.isoformat())
                     print(f"[green]UPDATED[/green] {d.isoformat()} (rows={len(df)})")
 
             except requests.HTTPError as e:
@@ -369,10 +385,15 @@ def _update_market_data_polygon_grouped(config: LoaderConfig) -> None:
                     print(f"[red]FAILED[/red] {d.isoformat()} - HTTPError")
                 else:
                     print(f"[red]FAILED[/red] {d.isoformat()} - HTTP {status}")
+                dates_failed.append(d.isoformat())
                 if config.fail_fast:
-                    raise
+                    code = status if status is not None else "error"
+                    raise RuntimeError(
+                        f"Polygon grouped daily failed for {d.isoformat()} (HTTP {code})"
+                    ) from None
             except Exception as e:  # noqa: BLE001
                 print(f"[red]FAILED[/red] {d.isoformat()} - {type(e).__name__}: {e}")
+                dates_failed.append(d.isoformat())
                 if config.fail_fast:
                     raise
 
@@ -380,8 +401,23 @@ def _update_market_data_polygon_grouped(config: LoaderConfig) -> None:
             progress.update(task_id, completed=completed)
 
     # Derived rebuild will be wired in a later step (derived-incremental).
-    print("[cyan]Rebuilding derived last-N dataset[/cyan]")
-    rebuild_last_n_bars_from_polygon_date_partitions(config)
+    print("[cyan]Refreshing derived last-N cache[/cyan]")
+    ensure_last_n_bars(config)
+    newest = max(config.paths.list_polygon_grouped_daily_partitions().keys(), default=None)
+    stamp = write_update_state(
+        config.paths,
+        vendor=str(config.ohlcv_vendor),
+        started_at=now_utc,
+        newest_partition=newest,
+        dates_updated=dates_updated,
+        dates_failed=dates_failed,
+        dates_no_data=dates_no_data,
+        ok=True,
+    )
+    print(
+        f"[green]Update stamp[/green] {stamp.path} "
+        f"(finished_at={stamp.finished_at.isoformat()}, newest={stamp.newest_partition})"
+    )
 
 
 def update_market_data(config: LoaderConfig) -> None:

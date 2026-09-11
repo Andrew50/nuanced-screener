@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from ...config import LoaderConfig
 from ...setups.eligibility import compute_eligibility
@@ -27,6 +27,7 @@ from ..types import (
     PreparedScan,
     ScanConfig,
     ScanDiagnostics,
+    StaleSnapshotError,
     VisionError,
 )
 from .bars import (
@@ -38,9 +39,10 @@ from .bars import (
 )
 from .freshness import (
     as_utc,
-    assert_dataset_freshness,
+    authorized_daily_session,
     coerce_date,
     expected_completed_session,
+    resolve_scan_session,
     utc_now,
 )
 
@@ -65,6 +67,25 @@ class SourceRevision:
         if not changed:
             return None
         return "Source changed during prepare: " + ", ".join(changed[:12])
+
+
+def tickers_for_window_load(
+    members: Sequence[str],
+    max_candidates: int | None,
+    *,
+    oversample: int = 4,
+) -> tuple[str, ...]:
+    """Stable ticker order for last-N loads. A positive cap avoids scanning the whole universe."""
+
+    ordered = tuple(sorted({str(t) for t in members}))
+    if max_candidates is None:
+        return ordered
+    cap = int(max_candidates)
+    if cap < 0:
+        raise VisionError("max_candidates must be >= 0")
+    if cap == 0:
+        return ordered
+    return ordered[: min(len(ordered), max(cap * oversample, cap))]
 
 
 class SetupScanSource:
@@ -102,11 +123,24 @@ class SetupScanSource:
             )
 
         now = as_utc(self._clock())
-        expected = expected_completed_session(now, calendar_name=self.calendar_name)
+        completed = expected_completed_session(now, calendar_name=self.calendar_name)
+        authorized = authorized_daily_session(now, calendar_name=self.calendar_name)
         capacity = inspect_last_n_capacity(loader)
         if capacity.max_rn < int(profile.lookback_bars):
             raise_insufficient_last_n(profile.lookback_bars, loader.repo_root)
-        assert_dataset_freshness(max_row_date=capacity.max_date, expected=expected)
+        try:
+            expected = resolve_scan_session(
+                mode=config.mode,
+                expected=completed,
+                authorized=authorized,
+                max_row_date=capacity.max_date,
+            )
+        except StaleSnapshotError as exc:
+            exc.rebuild_hint = (  # type: ignore[attr-defined]
+                f"ns update --repo-root {loader.repo_root.resolve()} && "
+                f"{rebuild_last100_hint(profile.lookback_bars, loader.repo_root)}"
+            )
+            raise
 
         universe = load_universe(loader)
         universe_tickers = {str(t) for t in universe["ticker"].astype(str).tolist()}
@@ -129,15 +163,17 @@ class SetupScanSource:
                 per_setup[sid] += 1
 
         feature_asof, features = _features_from_eligibility(eligibility.tickers, members)
+        window_tickers = tickers_for_window_load(tuple(members), self.max_candidates)
         windows, skips = load_candidate_windows(
             loader,
-            tickers=tuple(sorted(members)),
+            tickers=window_tickers,
             lookback_bars=int(profile.lookback_bars),
             expected_session=expected,
             feature_asof=feature_asof,
             volume_required=bool(profile.volume),
         )
         skipped_tickers = {s.ticker for s in skips}
+        skips = tuple(replace(s, features=features.get(s.ticker, s.features)) for s in skips)
         candidates = []
         for ticker in sorted(windows):
             if ticker in skipped_tickers:

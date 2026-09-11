@@ -32,7 +32,7 @@ BlockKind = Literal["text", "image"]
 BlockPurpose = Literal["instructions", "setup", "example", "candidate"]
 ArtifactKind = Literal["candidate", "example"]
 SkipKind = Literal["short_window", "stale", "unavailable_input"]
-SortKey = Literal["ticker", "asof_date", "match_strength", "candidate_id"]
+SortKey = Literal["ticker", "asof_date", "match_strength", "candidate_id", "arrival"]
 ErrorKind = Literal[
     "auth",
     "config",
@@ -315,6 +315,7 @@ class InputSkip:
     message: str
     asof_date: date | None = None
     bar_count: int | None = None
+    features: FeatureValue | None = None
 
 
 @dataclass(frozen=True)
@@ -328,6 +329,20 @@ class ScanDiagnostics:
     not_eligible_count: int | None = None
     skipped_count: int | None = None
     unavailable: tuple[str, ...] = ()
+
+
+COMPILER_ID = "snapshot_request_compiler_v1"
+
+
+@dataclass(frozen=True)
+class CompilerSnapshot:
+    """Frozen prompt/schema used to compile and resume a run."""
+
+    compiler_id: str
+    instructions: str
+    schema_name: str
+    json_schema: Mapping[str, Any]
+    fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -344,6 +359,7 @@ class PreparedScan:
     raw_digest: str
     global_filters_yaml_bytes: bytes
     global_filters_raw_digest: str
+    compiler: CompilerSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -490,6 +506,13 @@ class CandidateResult:
 
 @dataclass(frozen=True)
 class RunSummary:
+    """Terminal accounting for a scan.
+
+    ``candidates_completed`` means successfully classified only, never skipped
+    or failed. ``candidates_total`` is scan candidates plus input skips, so
+    ``completed + error + skipped + pending == total``.
+    """
+
     candidates_total: int
     candidates_completed: int
     candidates_error: int

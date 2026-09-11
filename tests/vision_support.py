@@ -549,6 +549,9 @@ class InMemoryRunStore:
     def journal_attempt(self, run_id: str, attempt: ClassificationAttempt) -> None:
         self.attempts[run_id].append(attempt)
 
+    def list_attempts(self, run_id: str) -> tuple[ClassificationAttempt, ...]:
+        return tuple(self.attempts.get(run_id, ()))
+
     def recover_attempt(self, run_id: str, batch_fingerprint: str) -> ClassificationAttempt | None:
         found = [
             a
@@ -562,12 +565,15 @@ class InMemoryRunStore:
     def commit_batch(self, run_id: str, *, batch_id: str, results: Sequence[CandidateResult], attempt: ClassificationAttempt) -> None:
         self.journal_attempt(run_id, attempt)
         for row in results:
-            if row.candidate_id not in self.results[run_id]:
+            prior = self.results[run_id].get(row.candidate_id)
+            if prior is None or prior.status == "error":
                 self.results[run_id][row.candidate_id] = row
 
     def mark_candidates(self, run_id: str, results: Sequence[CandidateResult]) -> None:
         for row in results:
-            self.results[run_id].setdefault(row.candidate_id, row)
+            prior = self.results[run_id].get(row.candidate_id)
+            if prior is None or prior.status == "error":
+                self.results[run_id][row.candidate_id] = row
 
     def list_committed_candidate_ids(self, run_id: str) -> frozenset[str]:
         return frozenset(

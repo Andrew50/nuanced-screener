@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Mapping, Sequence
 from uuid import uuid4
 
 from .serialization import digest
 from .types import (
     REASON_MAX_CHARS,
     RESPONSE_SCHEMA_NAME,
+    COMPILER_ID,
     CandidateInput,
     ChartArtifact,
     CompiledRequest,
+    CompilerSnapshot,
     ExampleInput,
     OversizeRequestError,
     RequestBlock,
@@ -102,7 +104,62 @@ def _candidate_text(candidate: CandidateInput) -> str:
     return "\n".join(lines)
 
 
+OUTPUT_TOKEN_BASE = 40
+OUTPUT_TOKEN_PER_ASSESSMENT = 90
+
+
+def estimate_output_tokens(assessment_count: int) -> int:
+    return OUTPUT_TOKEN_BASE + OUTPUT_TOKEN_PER_ASSESSMENT * int(assessment_count)
+
+
+def make_compiler_snapshot(
+    *,
+    instructions: str | None = None,
+    json_schema: Mapping | None = None,
+    schema_name: str | None = None,
+) -> CompilerSnapshot:
+    text = INSTRUCTIONS if instructions is None else str(instructions)
+    schema = load_response_schema() if json_schema is None else dict(json_schema)
+    name = schema_name or RESPONSE_SCHEMA_NAME
+    fingerprint = digest({"compiler_id": COMPILER_ID, "instructions": text, "schema_name": name, "schema": schema})
+    return CompilerSnapshot(
+        compiler_id=COMPILER_ID,
+        instructions=text,
+        schema_name=name,
+        json_schema=schema,
+        fingerprint=fingerprint,
+    )
+
+
 class SnapshotRequestCompiler:
+    def __init__(
+        self,
+        *,
+        instructions: str | None = None,
+        json_schema: Mapping | None = None,
+        schema_name: str | None = None,
+    ) -> None:
+        snap = make_compiler_snapshot(instructions=instructions, json_schema=json_schema, schema_name=schema_name)
+        self.instructions = snap.instructions
+        self.json_schema = dict(snap.json_schema)
+        self.schema_name = snap.schema_name
+        self.compiler_id = snap.compiler_id
+
+    def snapshot(self) -> CompilerSnapshot:
+        return make_compiler_snapshot(
+            instructions=self.instructions,
+            json_schema=self.json_schema,
+            schema_name=self.schema_name,
+        )
+
+    @classmethod
+    def from_snapshot(cls, snap: CompilerSnapshot) -> "SnapshotRequestCompiler":
+        return cls(
+            instructions=snap.instructions,
+            json_schema=snap.json_schema,
+            schema_name=snap.schema_name,
+        )
+
     def compile(
         self,
         *,
@@ -133,7 +190,7 @@ class SnapshotRequestCompiler:
         cand_arts = { a.candidate_id: a for a in candidate_artifacts }
 
         blocks: list[RequestBlock] = [
-            RequestBlock(kind="text", purpose="instructions", text=INSTRUCTIONS),
+            RequestBlock(kind="text", purpose="instructions", text=self.instructions),
         ]
         for setup in setup_order:
             blocks.append(RequestBlock(kind="text", purpose="setup", text=_setup_text(setup)))
@@ -164,7 +221,7 @@ class SnapshotRequestCompiler:
                 )
             )
 
-        schema = load_response_schema()
+        schema = dict(self.json_schema)
         bid = batch_id or f"batch-{uuid4().hex[:12]}"
         ref_images = sum(1 for b in blocks if b.kind == "image" and b.purpose == "example")
         cand_images = sum(1 for b in blocks if b.kind == "image" and b.purpose == "candidate")
@@ -181,12 +238,19 @@ class SnapshotRequestCompiler:
             total_image_count=ref_images + cand_images,
             text_chars=text_chars,
             transport_bytes_estimate=transport,
-            anticipated_output_tokens_estimate=40 + 90 * n_assess,
+            anticipated_output_tokens_estimate=estimate_output_tokens(n_assess),
         )
         if estimates.total_image_count > int(config.max_images_per_request):
             raise OversizeRequestError(
                 f"Batch has {estimates.total_image_count} images; max_images_per_request="
                 f"{config.max_images_per_request}. Examples and candidates were not dropped.",
+                estimates=estimates,
+            )
+        if estimates.anticipated_output_tokens_estimate > int(config.max_output_tokens):
+            raise OversizeRequestError(
+                f"Estimated output tokens {estimates.anticipated_output_tokens_estimate} exceed "
+                f"max_output_tokens={config.max_output_tokens}. Split the batch or reduce eligible "
+                "setups. A single candidate that cannot fit will fail rather than be sent.",
                 estimates=estimates,
             )
         if estimates.transport_bytes_estimate > int(config.max_request_bytes):
@@ -198,7 +262,7 @@ class SnapshotRequestCompiler:
         fingerprint = digest(
             {
                 "model": config.model,
-                "schema": RESPONSE_SCHEMA_NAME,
+                "schema": self.schema_name,
                 "setup_ids": [s.setup_id for s in setup_order],
                 "candidate_ids": [c.candidate_id for c in candidates_t],
                 "blocks": [
@@ -219,7 +283,7 @@ class SnapshotRequestCompiler:
             setup_ids=tuple(s.setup_id for s in setup_order),
             blocks=tuple(blocks),
             json_schema=schema,
-            schema_name=RESPONSE_SCHEMA_NAME,
+            schema_name=self.schema_name,
             fingerprint=fingerprint,
             estimates=estimates,
             model=config.model,
