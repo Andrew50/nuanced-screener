@@ -12,13 +12,14 @@ from .components import (
     UI_LIST_PAGE_SIZE,
     VIEW_ALL,
     VIEW_LABELS,
+    VIEW_MATCHES,
     build_result_query,
+    result_list_label,
     format_adr_pct,
     format_dollar_vol_millions,
     md_escape_dollars,
     reconcile_selected_candidate,
     review_widget_keys,
-    run_status_label,
     state_key,
     unavailable_text,
 )
@@ -82,6 +83,10 @@ _LIST_CSS = """
   .st-key-ns_result_list div[data-testid="stButton"] {
     margin: 0 !important;
   }
+  .st-key-ns_result_list div[data-testid="stButton"] button,
+  .st-key-ns_result_list div[data-testid="stButton"] button * {
+    color: var(--text-color, #fafafa) !important;
+  }
   .st-key-ns_result_list div[data-testid="stButton"] button {
     background: transparent !important;
     border: none !important;
@@ -89,13 +94,33 @@ _LIST_CSS = """
     border-radius: 0 !important;
     box-shadow: none !important;
     justify-content: flex-start !important;
+    align-items: center !important;
+    height: 1.45rem !important;
     min-height: 1.45rem !important;
-    padding: 0.12rem 0.4rem !important;
+    max-height: 1.45rem !important;
+    padding: 0.12rem 0.55rem !important;
     font-weight: 500 !important;
     line-height: 1.2 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
   }
-  .st-key-ns_result_list div[data-testid="stButton"] button[kind="primary"] {
-    background: rgba(128,128,128,0.18) !important;
+  .st-key-ns_result_list div[data-testid="stButton"] button p,
+  .st-key-ns_result_list div[data-testid="stButton"] button span,
+  .st-key-ns_result_list div[data-testid="stButton"] button div {
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    margin: 0 !important;
+    line-height: 1.2 !important;
+  }
+  .st-key-ns_result_list div[data-testid="stButton"] button:hover {
+    background: color-mix(in srgb, var(--text-color, #fff) 8%, transparent) !important;
+  }
+  .st-key-ns_result_list div[data-testid="stButton"] button[kind="primary"],
+  .st-key-ns_result_list div[data-testid="stButton"] button[data-testid="stBaseButton-primary"] {
+    background: color-mix(in srgb, var(--text-color, #fff) 16%, transparent) !important;
+    box-shadow: inset 3px 0 0 var(--primary-color, #ff4b4b) !important;
   }
   .st-key-ns_keynav {
     position: absolute !important;
@@ -152,6 +177,7 @@ def render_results_list(
 
     st = _st()
     st.markdown(_LIST_CSS, unsafe_allow_html=True)
+    st.markdown("**Results**")
     runs = reader.list_runs()
     if not runs:
         _clear_snapshot(st)
@@ -172,7 +198,12 @@ def render_results_list(
     if include_run_picker:
         if state_key("run_id") not in st.session_state or st.session_state[state_key("run_id")] not in run_ids:
             st.session_state[state_key("run_id")] = run_ids[0]
-        with st.expander("Debug"):
+        with st.expander("Settings"):
+            st.checkbox(
+                "Include misses",
+                key=state_key("include_misses"),
+                help="Also list tickers the model graded but did not match. The reason stays under the chart.",
+            )
             st.selectbox(
                 "Run",
                 options=run_ids,
@@ -196,7 +227,7 @@ def render_results_list(
     st.session_state[state_key("prev_run_id")] = run_id
 
     try:
-        stored = reader.load_run(run_id)
+        reader.load_run(run_id)
         frozen = reader.load_frozen_inputs(run_id)
     except VisionError as exc:
         _clear_snapshot(st)
@@ -206,10 +237,7 @@ def render_results_list(
     counts = reader.extended_counts(run_id)
     setups = list(frozen.setups)
     setup_options = [s.setup_id for s in setups]
-    st.caption(
-        f"{run_status_label(stored.status, synthetic=stored.synthetic, mode=stored.config.mode)} · "
-        f"{counts.completed}/{counts.candidates} settled · {counts.setup_matches} matches"
-    )
+    st.caption(f"{counts.completed}/{counts.candidates} screened · {counts.setup_matches} matches")
     with st.expander("Filters"):
         view = st.selectbox(
             "View",
@@ -253,10 +281,17 @@ def render_results_list(
     selected_setups = list(st.session_state.get(state_key("setup_ids")) or [])
     strength = st.session_state.get(state_key("min_strength"), "any")
     review_state = str(st.session_state.get(state_key("review_state") or "any"))
+    include_misses = bool(st.session_state.get(state_key("include_misses")))
     min_strength = None if strength == "any" else int(strength)
+    if include_misses and view in {VIEW_ALL, VIEW_MATCHES}:
+        query_view = VIEW_ALL
+    elif not include_misses and view == VIEW_ALL:
+        query_view = VIEW_MATCHES
+    else:
+        query_view = view
     query, statuses = build_result_query(
         run_id=run_id,
-        view=view,
+        view=query_view,
         setup_ids=selected_setups,
         min_match_strength=min_strength,
         review_state=review_state,
@@ -265,7 +300,9 @@ def render_results_list(
         page=1,
         page_size=page_size,
     )
-    if view == VIEW_ALL and not statuses:
+    if include_misses and query_view == VIEW_ALL:
+        statuses = ("completed",)
+    elif query_view == VIEW_ALL and not statuses:
         statuses = ("completed", "error")
     ordered_ids = reader.ordered_ids(query, ticker_query=ticker_query, statuses=statuses)
     selected_id = reconcile_selected_candidate(
@@ -296,7 +333,7 @@ def render_results_list(
         for row in result_page.items:
             selected = row.candidate_id == selected_id
             if st.button(
-                row.ticker,
+                result_list_label(row),
                 key=state_key(f"pick_{run_id}_{row.candidate_id}"),
                 type="primary" if selected else "secondary",
                 width="stretch",

@@ -107,7 +107,7 @@ ns models train --labels-csv labels.csv --model-type ssl_tcn_classifier --setup 
 
 Use `ns models --help`, `ns candidates --help`, `ns weak --help`, `ns setups --help`, `ns screen --help`, and `ns vision --help` for the full surface. `--setup` filters must match values present in `labels.csv` (for example `F`), not the separate heuristic names used by weak-supervision helpers.
 
-`ns screen` is the LLM chart-setup pipeline (alias: `ns vision scan`). Live screens auto-run `ns update` when `data/meta/update_state.json` is missing or older than 24 hours (`--skip-update` to disable). `ns models scan` remains the trained-model scorer. Named DuckDB queries are `ns query`.
+`ns screen` is the LLM chart-setup pipeline (alias: `ns vision scan`). `ns screen ui` opens the results Streamlit app, the same way `ns setups ui` opens the builder. Live screens auto-run `ns update` when `data/meta/update_state.json` is missing or older than 24 hours (`--skip-update` to disable). `ns models scan` remains the trained-model scorer. Named DuckDB queries are `ns query`.
 
 Vision chart classification (YAML setups → last-N charts → optional Responses API) is documented in [docs/VISION_MVP.md](docs/VISION_MVP.md). `ns setups ui` and `ns vision view` share one Streamlit app (builder vs Results). Results can launch an explicit capped scan (dry-run / demo / live); the list live-updates as batches commit. Storage is `data/vision_scans/`. Live scans need `OPENAI_API_KEY` and `NS_VISION_MODEL`; a missing key does not invent results.
 

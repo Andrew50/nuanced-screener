@@ -6,8 +6,8 @@ launches ``VisionApp``. It never auto-runs on rerender. Live mode still
 requires ``NS_VISION_MODEL`` and ``OPENAI_API_KEY``; a missing key does not
 fall back to demo results.
 
-The default control is a single Run scan of the whole eligible universe.
-Mode, candidate cap, and resume live under Debug.
+The default control is a single Screen of the whole eligible universe.
+Mode, candidate cap, and resume live under Settings.
 
 Scans run on a background thread. The Results page polls the filesystem store
 so candidate rows appear as batches commit.
@@ -21,6 +21,7 @@ import os
 
 from screener_loader.config import LoaderConfig
 from screener_loader.vision.adapters.demo import DEMO_MODEL_ID
+from screener_loader.vision.adapters.source import normalize_screen_tickers
 from screener_loader.vision.service import VisionApp, require_explicit_live_model
 from screener_loader.vision.types import ScanConfig, ScanOutcome, VisionError
 
@@ -50,6 +51,7 @@ class ScanLaunchSpec:
     mode: str
     model: str
     max_candidates: int | None
+    tickers: tuple[str, ...] = ()
 
 
 def resolve_scan_launch(
@@ -58,6 +60,7 @@ def resolve_scan_launch(
     model: str,
     env_model: str = "",
     max_candidates: int,
+    tickers: str | None = None,
 ) -> ScanLaunchSpec:
     chosen = str(mode).strip().lower()
     if chosen not in {"live", "dry_run", "demo"}:
@@ -77,7 +80,12 @@ def resolve_scan_launch(
         if not explicit:
             raise VisionError("Live scans require an explicit model id (NS_VISION_MODEL)")
         model_id = require_explicit_live_model(explicit)
-    return ScanLaunchSpec(mode=chosen, model=model_id, max_candidates=limited)
+    return ScanLaunchSpec(
+        mode=chosen,
+        model=model_id,
+        max_candidates=limited,
+        tickers=normalize_screen_tickers([tickers] if tickers else []),
+    )
 
 
 def format_scan_error(exc: BaseException) -> str:
@@ -88,12 +96,19 @@ def format_scan_error(exc: BaseException) -> str:
     return text
 
 
-def _run_kwargs(*, cancel: Any | None, on_run_created: OnRunCreated | None) -> dict[str, Any]:
+def _run_kwargs(
+    *,
+    cancel: Any | None,
+    on_run_created: OnRunCreated | None,
+    on_candidate: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
     kwargs: dict[str, Any] = {}
     if cancel is not None:
         kwargs["cancel"] = cancel
     if on_run_created is not None:
         kwargs["on_run_created"] = on_run_created
+    if on_candidate is not None:
+        kwargs["on_candidate"] = on_candidate
     return kwargs
 
 
@@ -107,13 +122,14 @@ def launch_scan(
     max_output_tokens: int = 4096,
     cancel: Any | None = None,
     on_run_created: OnRunCreated | None = None,
+    on_candidate: Callable[[str], None] | None = None,
 ) -> ScanOutcome:
     if spec.mode == "live" and not str(os.environ.get("OPENAI_API_KEY") or "").strip():
         raise VisionError(
             "OPENAI_API_KEY is missing; refusing to invent results. Use Dry-run or Demo for offline checks."
         )
     factory = app_factory or VisionApp
-    app = factory(cfg, max_candidates=spec.max_candidates)
+    app = factory(cfg, max_candidates=spec.max_candidates, tickers=spec.tickers or None)
     config = ScanConfig(
         model=spec.model,
         mode=spec.mode,  # type: ignore[arg-type]
@@ -121,7 +137,10 @@ def launch_scan(
         batch_size=int(batch_size),
         max_output_tokens=int(max_output_tokens),
     )
-    return app.run(config, **_run_kwargs(cancel=cancel, on_run_created=on_run_created))
+    return app.run(
+        config,
+        **_run_kwargs(cancel=cancel, on_run_created=on_run_created, on_candidate=on_candidate),
+    )
 
 
 def resume_scan(
@@ -131,12 +150,16 @@ def resume_scan(
     app_factory: AppFactory | None = None,
     cancel: Any | None = None,
     on_run_created: OnRunCreated | None = None,
+    on_candidate: Callable[[str], None] | None = None,
 ) -> ScanOutcome:
     rid = str(run_id or "").strip()
     if not rid:
         raise VisionError("Select a saved run before resume")
     factory = app_factory or VisionApp
-    return factory(cfg).resume(rid, **_run_kwargs(cancel=cancel, on_run_created=on_run_created))
+    return factory(cfg).resume(
+        rid,
+        **_run_kwargs(cancel=cancel, on_run_created=on_run_created, on_candidate=on_candidate),
+    )
 
 
 def _stop_following_job() -> None:
@@ -166,10 +189,16 @@ def render_scan_panel(
         st.session_state["vs_mode"] = "Live"
     if "vs_max_candidates" not in st.session_state:
         st.session_state["vs_max_candidates"] = DEFAULT_MAX_CANDIDATES
+    if "vs_tickers" not in st.session_state:
+        st.session_state["vs_tickers"] = ""
 
-    run_clicked = st.button("Run scan", type="primary", key="vs_run", disabled=busy, width="stretch")
     resume_clicked = False
-    with st.expander("Debug"):
+    with st.expander("Settings"):
+        st.checkbox(
+            "Include misses",
+            key=state_key("include_misses"),
+            help="Also list tickers the model graded but did not match. The reason stays under the chart.",
+        )
         st.radio("Mode", MODE_LABELS, horizontal=True, key="vs_mode")
         st.number_input(
             "Max candidates",
@@ -178,6 +207,11 @@ def render_scan_panel(
             step=1,
             key="vs_max_candidates",
             help="0 = whole eligible universe. Cap after eligibility for smoke tests.",
+        )
+        st.text_input(
+            "Tickers",
+            key="vs_tickers",
+            help="Optional. Comma-separated symbols, same as `ns screen --ticker`. Empty screens the eligible universe.",
         )
         _store, reader, _reviews = open_vision_scans(default_scan_root(cfg))
         runs = reader.list_runs()
@@ -218,6 +252,13 @@ def render_scan_panel(
             width="stretch",
             help=f"Resume {resume_id}" if resume_id else "Select a saved run first",
         )
+    run_clicked = st.button("Screen", type="primary", key="vs_run", disabled=busy, width="stretch")
+    if job is not None and job.is_active():
+        if job.cancel.is_set():
+            st.button("Cancelling", key="vs_cancel_pending", disabled=True, width="stretch")
+        elif st.button("Cancel", key="vs_cancel", width="stretch"):
+            job.request_cancel()
+            st.rerun()
     mode = MODE_BY_LABEL[str(st.session_state.get("vs_mode") or "Live")]
     max_candidates = int(st.session_state.get("vs_max_candidates") or 0)
     resume_id = str(st.session_state.get(state_key("run_id")) or "").strip()
@@ -228,6 +269,7 @@ def render_scan_panel(
                 model="",
                 env_model=env_model,
                 max_candidates=max_candidates,
+                tickers=str(st.session_state.get("vs_tickers") or ""),
             )
             if spec.mode == "live" and not str(os.environ.get("OPENAI_API_KEY") or "").strip():
                 raise VisionError(
@@ -266,7 +308,3 @@ def render_scan_status(job: Any, reader: Any | None = None) -> None:
         return
     st.progress(prog.fraction if prog.total else (0.05 if job.is_active() else 1.0))
     st.caption(prog.caption)
-    if job.is_active():
-        if st.button("Cancel scan", key="vs_cancel"):
-            job.cancel.set()
-            st.rerun()

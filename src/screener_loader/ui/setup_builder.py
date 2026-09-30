@@ -78,7 +78,9 @@ def render_builder_page() -> None:
         selected = ids[0] if ids else None
         st.session_state["setup_id"] = selected
 
-    col_list, col_main = st.columns([0.9, 3.1], gap="large")
+    page = st.container(horizontal=True, wrap=False, gap="small", vertical_alignment="top", key="ns_page")
+    col_list = page.container(width=320)
+    col_main = page.container(width="stretch", key="ns_chart")
 
     with col_list:
         head, plus = st.columns([3.2, 0.8])

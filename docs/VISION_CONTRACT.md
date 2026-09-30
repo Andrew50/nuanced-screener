@@ -170,7 +170,7 @@ Append-only. `add_review` inserts a new `ReviewRecord` whose `supersedes_review_
 
 - Validate prepared inputs, profile, examples, and config before provider calls. Broken required catalog references (missing example bytes/windows) fail preflight. Candidate-specific render failures skip/error that candidate only.
 - Freeze inputs / `create_run` before API work. Prepare reference images once. Render with bounded memory. Persist chart bytes before compile/classify.
-- Deterministic batches: candidates sorted by `candidate_id`, packed up to `batch_size` (default 10) and image/byte budgets. Default `max_concurrency=2`. Do not enqueue thousands of full payloads; in-flight batches ≤ `max_in_flight_batches`.
+- Deterministic batches: candidates sorted by `candidate_id`, packed up to `batch_size` (default 10) and image/byte budgets. Default `max_concurrency=16`. Do not enqueue thousands of full payloads; in-flight batches ≤ `max_in_flight_batches`.
 - Retry/pacing is the runner's: bounded exponential backoff + jitter, honor `Retry-After`, injectable clock/random/sleep. Stop dispatch on `auth`/`config`. Limited retry then **split** (partition remaining uncommitted candidates) for `incomplete` / `invalid_output` / `oversize`. Child batches never duplicate committed work. Do not rephrase refusals in a loop; refusals are candidate `error`.
 - Dry-run: render, compile, estimate; zero `Classifier.classify` calls; no fake assessments. Demo: caller injects a labeled fake classifier (`mode="demo"`, `synthetic=True` on the outcome). Neither is a silent missing-key fallback.
 

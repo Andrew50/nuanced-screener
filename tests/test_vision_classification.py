@@ -351,3 +351,14 @@ def test_vision_client_refusal_truncation_rate_limit() -> None:
     assert rl.error.kind == "rate_limit"
     assert rl.error.retry_after_seconds == 1.5
     assert rl.error.retryable is True
+
+    class Quota:
+        def create(self, **kwargs):
+            raise RateLimitError(
+                "Error code: 429 - {'error': {'code': 'credit_balance_exhausted', 'type': 'insufficient_quota'}}"
+            )
+
+    quota = OpenAIClassifier(client=SimpleNamespace(responses=Quota()), images=images).classify(req)
+    assert quota.error.kind == "config"
+    assert quota.error.retryable is False
+    assert "no credits" in quota.error.message

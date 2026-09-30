@@ -70,6 +70,19 @@ def test_resolve_scan_session_offline_modes_use_snapshot_max() -> None:
         )
 
 
+def test_prepare_limits_to_requested_tickers_and_explains_misses(tmp_path: Path) -> None:
+    handles = build_catalog(tmp_path, include_examples=False)
+    prepared = _source(handles, tickers=["aapl", "MISS", "OUT", "NULLADR"]).prepare(_cfg())
+    assert {c.ticker for c in prepared.candidates} == {"AAPL"}
+    reasons = {skip.ticker: skip.message for skip in prepared.skips}
+    assert "MISS" in reasons
+    assert "last-N" in reasons["MISS"]
+    assert "OUT" in reasons
+    assert "universe" in reasons["OUT"]
+    assert "NULLADR" in reasons
+    assert "adr_pct_20" in reasons["NULLADR"]
+
+
 def test_tickers_for_window_load_caps_before_last_n() -> None:
     from screener_loader.vision.adapters.source import tickers_for_window_load
 

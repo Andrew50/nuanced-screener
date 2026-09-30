@@ -73,7 +73,7 @@ Relative artifact paths, run locks, append-only reviews, one row per candidate, 
 
 - No real ScanSource, persistence, results UI, or CLI registration here.
 - OpenAI billing is not exactly-once across crash/network ambiguity; recover stored JSON when present.
-- `max_concurrency=2`, `batch_size=10` are conservative defaults, not throughput promises. The 3,000-candidate fake test only guards unbounded in-flight compile/classify (`peak_in_flight <= 2`, `max_seen_candidates <= 10`).
+- `max_concurrency=16`, `batch_size=10` match the measured OpenAI headroom for this account (500 RPM / 500k TPM). The 3,000-candidate fake test still passes an explicit cap and guards unbounded in-flight compile/classify (`peak_in_flight <= 2`, `max_seen_candidates <= 10`).
 - Refusal/timeout/invalid_output/unavailable_input never become `no_match`.
 - SMA uses displayed bars only (`min_periods=period`); long periods stay configured and report unavailable.
 - Production never silently substitutes `FakeClassifier` when the API key is missing.

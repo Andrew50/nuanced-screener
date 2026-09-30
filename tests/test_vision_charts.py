@@ -159,6 +159,30 @@ def test_vision_flat_doji_zero_volume_and_final_session_title() -> None:
     assert set(plt.get_fignums()) == before
 
 
+def test_process_pool_png_matches_in_process_chart() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    df = _ohlcv_df(40)
+    asof = date(2026, 6, 18)
+    window = make_bar_window("NVDA", bars_from_rows(df.to_dict("records")))
+    profile = default_profile(lookback_bars=40, moving_averages=(10, 20, 50))
+    title = "NVDA  2026-06-18"
+    inline = MatplotlibChartRenderer(processes=1).render(window, profile, title=title)
+    pool = MatplotlibChartRenderer(processes=4)
+    pool.open()
+    try:
+        assert pool._executor is not None
+        assert pool._executor._max_workers == 4
+        with ThreadPoolExecutor(max_workers=8) as threads:
+            arts = list(threads.map(lambda _i: pool.render(window, profile, title=title), range(8)))
+    finally:
+        pool.close()
+    assert pool._executor is None
+    for art in arts:
+        assert art.image.png_bytes == inline.image.png_bytes
+        assert art.image.png_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+
+
 def test_vision_upload_example_keeps_original_bytes() -> None:
     spec = make_spec("flag")
     example = make_example("shot", kind="image", polarity="negative")

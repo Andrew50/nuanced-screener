@@ -157,14 +157,14 @@ class ScanConfig:
     timeout_seconds: float = 60.0
     max_output_tokens: int = 4096
     batch_size: int = 10
-    max_concurrency: int = 2
+    max_concurrency: int = 16
     max_retries: int = 3
     retry_backoff_seconds: float = 1.0
     retry_backoff_max_seconds: float = 20.0
     jitter_ratio: float = 0.25
     max_request_bytes: int = 2_500_000
     max_images_per_request: int = 24
-    max_in_flight_batches: int = 2
+    max_in_flight_batches: int = 16
     image_detail: ImageDetail = "auto"
     mode: ScanMode = "live"
     request_label: str | None = None

@@ -21,6 +21,8 @@ PAGE_LABELS = (PAGE_SETUPS, PAGE_SCREENER)
 
 # Streamlit's default header (Deploy / toolbar) is position:fixed over the first
 # row of the page. Hide it and keep enough top padding that Setups/Screener stay clickable.
+# The page shell is full-bleed: the left rail stays at the window edge and the chart
+# column stretches to the right edge.
 _APP_CHROME = """
 <style>
   [data-testid="stSidebar"] {display: none !important;}
@@ -31,7 +33,34 @@ _APP_CHROME = """
   [data-testid="stStatusWidget"] {display: none !important;}
   .stAppToolbar, .stAppDeployButton, header[data-testid="stHeader"] {display: none !important;}
   .stApp > header {display: none !important;}
-  .block-container {padding-top: 2.25rem; padding-bottom: 2rem; max-width: 1600px;}
+  [data-testid="stMainBlockContainer"],
+  .block-container,
+  section.main > div.block-container {
+    max-width: 100% !important;
+    width: 100% !important;
+    padding-top: 1rem !important;
+    padding-bottom: 1rem !important;
+    padding-left: 0.65rem !important;
+    padding-right: 0.65rem !important;
+  }
+  .st-key-ns_page {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+  .st-key-ns_chart {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+  }
+  .st-key-ns_chart [data-testid="stFullScreenFrame"] > div,
+  .st-key-ns_chart [data-testid="stImage"],
+  .st-key-ns_chart [data-testid="stImageContainer"],
+  .st-key-ns_chart [data-testid="stImageContainer"] img {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+  }
 </style>
 """
 
@@ -49,12 +78,13 @@ def _initial_page() -> str:
 
 def _render_header(st) -> None:
     st.markdown(_APP_CHROME, unsafe_allow_html=True)
-    st.radio(
+    st.segmented_control(
         "Page",
         PAGE_LABELS,
-        horizontal=True,
         key=NAV_KEY,
         label_visibility="collapsed",
+        width="content",
+        required=True,
     )
     st.divider()
 
@@ -95,10 +125,14 @@ def main() -> None:
     from screener_loader.vision_ui.results_page import render_results_detail, render_results_list
 
     cfg = LoaderConfig(repo_root=_repo_root())
-    col_side, col_main = st.columns([0.9, 3.1], gap="large")
+    page = st.container(horizontal=True, wrap=False, gap="small", vertical_alignment="top", key="ns_page")
+    col_side = page.container(width=320)
+    col_main = page.container(width="stretch", key="ns_chart")
 
     with col_side:
         job = render_scan_panel(cfg)
+
+        polling = should_live_refresh(job)
 
         def _sidebar_results() -> None:
             from screener_loader.ui.scan_panel import render_scan_status
@@ -108,8 +142,10 @@ def main() -> None:
             follow = bool(st.session_state.get(FOLLOW_JOB_KEY))
             override = job.run_id if follow and job is not None and job.run_id else None
             render_results_list(reader, include_run_picker=False, run_id_override=override)
+            if polling and job is not None and not job.is_active():
+                st.rerun(scope="app")
 
-        if should_live_refresh(job):
+        if polling:
             st.fragment(_sidebar_results, run_every=timedelta(seconds=LIVE_REFRESH_SECONDS))()
         else:
             _sidebar_results()

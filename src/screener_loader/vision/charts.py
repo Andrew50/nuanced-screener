@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date
+from multiprocessing import get_context
+from threading import Lock
 from typing import Any, Mapping
+import os
 
 from .serialization import digest_bytes
 from .snapshots import moving_average_availability, profile_from_style
@@ -60,6 +64,17 @@ def bars_to_frame(window: BarWindow):
     return pd.DataFrame(rows)
 
 
+def chart_process_count() -> int:
+    """Worker processes for scan rendering. ``NS_CHART_PROCESSES=1`` stays in-process."""
+
+    raw = os.environ.get("NS_CHART_PROCESSES", "4")
+    try:
+        count = int(raw)
+    except ValueError:
+        count = 4
+    return max(1, count)
+
+
 def render_window_png(
     window: BarWindow,
     profile: ChartProfile,
@@ -83,8 +98,43 @@ def render_window_png(
     )
 
 
+def _render_window_job(window: BarWindow, profile: ChartProfile, title: str | None) -> bytes:
+    """Process-pool entry point. Must stay importable from this module."""
+
+    return render_window_png(window, profile, title=title)
+
+
 class MatplotlibChartRenderer:
-    """Delegates plotting to setups.charts. Does not query data or write files."""
+    """Delegates plotting to setups.charts. Does not query data or write files.
+
+    ``open()`` starts a spawn-based process pool (default 4). Matplotlib's plot
+    lock serializes threads inside one process, so scan batches submit renders
+    here and the model calls stay on the scanner's thread pool. ``render()``
+    without ``open()`` draws in-process.
+    """
+
+    def __init__(self, *, processes: int | None = None) -> None:
+        self.processes = chart_process_count() if processes is None else max(1, int(processes))
+        self._executor: ProcessPoolExecutor | None = None
+        self._executor_lock = Lock()
+
+    def open(self) -> None:
+        if self.processes <= 1:
+            return
+        with self._executor_lock:
+            if self._executor is not None:
+                return
+            self._executor = ProcessPoolExecutor(
+                max_workers=self.processes,
+                mp_context=get_context("spawn"),
+            )
+
+    def close(self) -> None:
+        with self._executor_lock:
+            executor = self._executor
+            self._executor = None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=False)
 
     def render(
         self,
@@ -93,7 +143,7 @@ class MatplotlibChartRenderer:
         *,
         title: str | None = None,
     ) -> ChartArtifact:
-        png = render_window_png(window, profile, title=title)
+        png = self._render_png(window, profile, title=title)
         width, height = png_dimensions(png)
         asof = window.asof_date
         image = RenderedImage(
@@ -114,6 +164,18 @@ class MatplotlibChartRenderer:
             ticker=window.ticker,
             source="rendered",
         )
+
+    def _render_png(
+        self,
+        window: BarWindow,
+        profile: ChartProfile,
+        *,
+        title: str | None,
+    ) -> bytes:
+        executor = self._executor
+        if executor is None:
+            return render_window_png(window, profile, title=title)
+        return executor.submit(_render_window_job, window, profile, title).result()
 
     def wrap_upload(self, example: ExampleInput) -> ChartArtifact:
         data = example.image_bytes

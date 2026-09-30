@@ -42,6 +42,13 @@ def test_resolve_scan_launch_live_requires_real_model() -> None:
     assert live.max_candidates == 8
 
 
+def test_resolve_scan_launch_parses_tickers() -> None:
+    spec = resolve_scan_launch(mode="demo", model="", max_candidates=0, tickers="pi, aapl, PI")
+    assert spec.tickers == ("PI", "AAPL")
+    empty = resolve_scan_launch(mode="demo", model="", max_candidates=0, tickers="  ")
+    assert empty.tickers == ()
+
+
 def test_resolve_scan_launch_zero_is_uncapped() -> None:
     spec = resolve_scan_launch(mode="demo", model="", max_candidates=0)
     assert spec.max_candidates is None
@@ -73,8 +80,9 @@ def test_launch_scan_uses_factory_and_cap(tmp_path: Path) -> None:
 
     @dataclass
     class _FakeApp:
-        def __init__(self, _cfg, *, max_candidates=None):
+        def __init__(self, _cfg, *, max_candidates=None, tickers=None):
             seen["max_candidates"] = max_candidates
+            seen["tickers"] = tickers
 
         def run(self, config, **_kwargs):
             seen["mode"] = config.mode
@@ -120,8 +128,9 @@ def test_scan_panel_button_calls_factory(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("NS_REPO_ROOT", str(tmp_path))
 
     class _FakeApp:
-        def __init__(self, _cfg, *, max_candidates=None):
+        def __init__(self, _cfg, *, max_candidates=None, tickers=None):
             self.max_candidates = max_candidates
+            self.tickers = tickers
 
         def run(self, config, **kwargs):
             assert config.mode in {"demo", "dry_run", "live"}
@@ -173,7 +182,7 @@ def test_scan_panel_button_calls_factory(tmp_path: Path, monkeypatch: pytest.Mon
     radios[0].set_value("Demo").run()
     assert not at.exception
     assert not any(getattr(t, "label", "") == "Model" for t in at.text_input)
-    run_btn = next(b for b in at.button if b.label == "Run scan")
+    run_btn = next(b for b in at.button if b.label == "Screen")
     run_btn.click().run()
     assert not at.exception
     from screener_loader.ui.scan_jobs import _JOBS, _JOBS_LOCK
@@ -186,6 +195,41 @@ def test_scan_panel_button_calls_factory(tmp_path: Path, monkeypatch: pytest.Mon
         job.thread.join(timeout=5)
     assert job.run_id == "run-from-ui"
     assert job.snapshot()[0] == "done"
+
+
+def test_cancel_button_marks_job_and_shows_cancelling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    from screener_loader.ui.scan_jobs import JOB_SESSION_KEY, ScanJob, register_job
+
+    monkeypatch.setenv("NS_REPO_ROOT", str(tmp_path))
+    job = ScanJob("job-cancel-ui")
+    job.phase = "running"
+    register_job(job)
+
+    def _page():
+        import os
+        from pathlib import Path
+
+        from screener_loader.config import LoaderConfig as LC
+        from screener_loader.ui.scan_panel import render_scan_panel as panel
+
+        panel(LC(repo_root=Path(os.environ["NS_REPO_ROOT"])))
+
+    at = AppTest.from_function(_page, default_timeout=30)
+    at.session_state[JOB_SESSION_KEY] = job.job_id
+    at.run()
+    assert not at.exception
+    assert any(b.label == "Screen" and b.disabled for b in at.button)
+    cancel = next(b for b in at.button if b.label == "Cancel")
+    assert not cancel.disabled
+    cancel.click().run()
+    assert not at.exception
+    assert job.cancel.is_set()
+    assert job.phase == "cancelling"
+    assert any(b.label == "Cancelling" and b.disabled for b in at.button)
+    assert not any(b.label == "Cancel" for b in at.button)
 
 
 def test_shared_app_screener_lists_results_in_sidebar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,15 +252,16 @@ def test_shared_app_screener_lists_results_in_sidebar(tmp_path: Path, monkeypatc
     at.run()
     assert not at.exception
     labels = [str(b.label) for b in at.button]
-    assert "Run scan" in labels
+    assert "Screen" in labels
     assert "Prev page" not in labels
     assert "Next page" not in labels
     assert any(label == "Previous" for label in labels)
     assert any(label == "Next" for label in labels)
-    assert any(label in {"AAPL", "AAA", "MSFT", "NVDA"} for label in labels)
+    assert any(label.startswith(("AAPL - ", "AAA - ", "MSFT - ", "NVDA - ")) for label in labels)
+    assert any(getattr(c, "label", None) == "Include misses" for c in at.checkbox)
     assert not any(label.startswith("▸ ") for label in labels)
     assert not any(getattr(e, "label", None) == "Export" for e in at.expander)
-    assert any(getattr(e, "label", None) == "Debug" for e in at.expander)
+    assert any(getattr(e, "label", None) == "Settings" for e in at.expander)
     assert any(getattr(e, "label", None) == "Filters" for e in at.expander)
 
 
@@ -231,11 +276,11 @@ def test_shared_app_results_shows_scan_controls(tmp_path: Path, monkeypatch: pyt
     at.run()
     assert not at.exception
     labels = [str(b.label) for b in at.button]
-    assert "Run scan" in labels
+    assert "Screen" in labels
     assert any("Resume" in label for label in labels)
     assert not any(getattr(t, "label", "") == "Model" for t in at.text_input)
     assert not any(getattr(e, "label", None) == "Run a scan" for e in at.expander)
-    assert any(getattr(e, "label", None) == "Debug" for e in at.expander)
+    assert any(getattr(e, "label", None) == "Settings" for e in at.expander)
     markdown = " ".join(str(getattr(m, "value", m)) for m in at.markdown)
     assert "Nuanced" not in markdown
 
@@ -267,8 +312,9 @@ def test_background_job_records_run_id_live(tmp_path: Path) -> None:
     created: list[str] = []
 
     class _FakeApp:
-        def __init__(self, _cfg, *, max_candidates=None):
+        def __init__(self, _cfg, *, max_candidates=None, tickers=None):
             self.max_candidates = max_candidates
+            self.tickers = tickers
 
         def run(self, config, **kwargs):
             cb = kwargs.get("on_run_created")
@@ -288,6 +334,8 @@ def test_background_job_records_run_id_live(tmp_path: Path) -> None:
     assert prog.completed == 2
     assert prog.matches == 3
     assert 0 < prog.fraction <= 1
+    assert "run-live-1" not in prog.caption
+    assert prog.caption.startswith("Done")
 
 
 def test_progress_preparing_has_caption() -> None:
@@ -296,7 +344,55 @@ def test_progress_preparing_has_caption() -> None:
     job = ScanJob("abc")
     prog = progress_from_job(job)
     assert prog.phase == "preparing"
-    assert "Preparing" in prog.caption
+    assert "elapsed" in prog.caption
+    assert "eligibility" not in prog.caption.lower()
+    assert "abc" not in prog.caption
+
+
+def test_progress_caption_is_ticker_count_and_time() -> None:
+    from screener_loader.ui.scan_jobs import ScanJob, format_progress_caption, progress_from_job
+
+    caption = format_progress_caption(
+        phase="running",
+        error=None,
+        ticker="AAOI",
+        done=3,
+        total=12,
+        elapsed_s=42,
+        eta_s=126,
+    )
+    assert caption == "AAOI · 3/12 · 0:42 elapsed · ~2:06 left"
+    done = format_progress_caption(
+        phase="done",
+        error=None,
+        ticker="AAOI",
+        done=12,
+        total=12,
+        elapsed_s=90,
+        eta_s=None,
+    )
+    assert done == "Done · 12/12 · 1:30"
+    assert "AAOI" not in done
+
+    job = ScanJob("job-1")
+    job.phase = "running"
+    job.set_current_ticker("aaoi")
+    job.run_id = "run-20260929T213913Z-48ea7fd086"
+    prog = progress_from_job(job)
+    assert prog.ticker == "AAOI"
+    assert "AAOI" in prog.caption
+    assert "elapsed" in prog.caption
+    assert "run-2026" not in prog.caption
+    assert "48ea7fd086" not in prog.caption
+
+    job.request_cancel()
+    stopping = progress_from_job(job)
+    assert stopping.phase == "cancelling"
+    assert stopping.caption.startswith("Cancelling")
+    assert "AAOI" in stopping.caption
+    assert "left" not in stopping.caption
+    job.mark_cancelled()
+    assert progress_from_job(job).caption.startswith("Cancelled")
 
 
 def test_bind_run_created_invokes_callback() -> None:

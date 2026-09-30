@@ -47,7 +47,7 @@ def test_shared_app_streamlit_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     at = AppTest.from_file(str(app_file), default_timeout=30)
     at.run()
     assert not at.exception
-    labels = [str(getattr(r, "options", r)) for r in at.radio]
+    labels = [str(getattr(r, "options", r)) for r in at.segmented_control]
     assert any("Setups" in x and "Screener" in x for x in labels)
     assert any("Flag" in b.label for b in at.button)
     assert not any(b.label == "Create" for b in at.button)

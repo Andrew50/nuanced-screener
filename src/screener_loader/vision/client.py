@@ -321,7 +321,19 @@ class OpenAIClassifier:
         elif name in {"APIConnectionError"}:
             kind, retryable = "transport", True
         elif name in {"RateLimitError"}:
-            kind, retryable = "rate_limit", True
+            lowered = str(exc).lower()
+            if any(
+                token in lowered
+                for token in ("insufficient_quota", "credit_balance_exhausted", "no credits")
+            ):
+                kind, retryable = "config", False
+                message = (
+                    "OpenAI rejected the request because this API account has no credits remaining. "
+                    "Add credits at https://platform.openai.com/settings/organization/billing/ "
+                    "or point OPENAI_API_KEY at an account with quota."
+                )
+            else:
+                kind, retryable = "rate_limit", True
         elif name in {"BadRequestError"}:
             kind, retryable = "config", False
             lowered = str(exc).lower()

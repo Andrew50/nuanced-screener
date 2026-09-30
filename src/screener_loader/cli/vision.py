@@ -15,6 +15,8 @@ import typer
 from rich import print
 from rich.table import Table
 
+from rich.markup import escape
+
 from .common import _config
 from .root import app
 from ..update import update_market_data
@@ -22,6 +24,12 @@ from ..update_state import DEFAULT_STALE_AFTER, ensure_fresh_market_data, is_upd
 
 vision_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(vision_app, name="vision")
+screen_app = typer.Typer(
+    add_completion=False,
+    invoke_without_command=True,
+    help="LLM chart-setup screen. `ns screen` runs a scan; `ns screen ui` opens results.",
+)
+app.add_typer(screen_app, name="screen")
 
 
 def _fail(exc: Exception) -> None:
@@ -111,6 +119,8 @@ def _run_vision_screen(
     dry_run: bool,
     demo: bool,
     max_candidates: int | None,
+    tickers: list[str] | None,
+    verbose: bool,
     timeout_seconds: float,
     batch_size: int,
     max_output_tokens: int,
@@ -136,8 +146,10 @@ def _run_vision_screen(
         else:
             raise typer.BadParameter("Live scans require --model or NS_VISION_MODEL")
 
+    from screener_loader.vision.adapters.source import normalize_screen_tickers
     from screener_loader.vision.service import VisionApp
 
+    wanted = normalize_screen_tickers(tickers)
     cfg = _config(repo_root=repo_root)
     _maybe_refresh_market_data(
         cfg,
@@ -145,7 +157,7 @@ def _run_vision_screen(
         mode=chosen,
         stale_after_hours=stale_after_hours,
     )
-    services = VisionApp(cfg, max_candidates=max_candidates)
+    services = VisionApp(cfg, max_candidates=max_candidates, tickers=wanted or None)
     scan_config = _scan_config(
         model=model_id,
         mode=chosen,
@@ -168,10 +180,13 @@ def _run_vision_screen(
         f"synthetic={outcome.summary.synthetic}"
     )
     print(f"scan root: {services.scan_root}")
+    if verbose or wanted:
+        _print_verdicts(services, outcome.run_id, tickers=wanted, verbose=verbose)
 
 
-@app.command("screen")
+@screen_app.callback(invoke_without_command=True)
 def screen(
+    ctx: typer.Context,
     repo_root: Path = typer.Option(Path("."), "--repo-root"),
     model: Optional[str] = typer.Option(None, "--model", envvar="NS_VISION_MODEL"),
     mode: str = typer.Option("live", "--mode", help="live | dry_run | demo"),
@@ -181,6 +196,18 @@ def screen(
         None,
         "--max-candidates",
         help="Optional cap for smoke tests. Applied after eligibility, before freeze.",
+    ),
+    tickers: Optional[list[str]] = typer.Option(
+        None,
+        "--ticker",
+        "-t",
+        help="Screen only these tickers. Repeat the flag or pass a comma-separated list.",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Print every verdict and the model's reason, including no_match, uncertain, and names that never reached the model.",
     ),
     timeout_seconds: float = typer.Option(60.0, "--timeout-seconds"),
     batch_size: int = typer.Option(10, "--batch-size"),
@@ -198,6 +225,8 @@ def screen(
 ) -> None:
     """LLM chart-setup screen over last-N bars. Alias: `ns vision scan`."""
 
+    if ctx.invoked_subcommand is not None:
+        return
     _run_vision_screen(
         repo_root=repo_root,
         model=model,
@@ -205,12 +234,25 @@ def screen(
         dry_run=dry_run,
         demo=demo,
         max_candidates=max_candidates,
+        tickers=tickers,
+        verbose=verbose,
         timeout_seconds=timeout_seconds,
         batch_size=batch_size,
         max_output_tokens=max_output_tokens,
         skip_update=skip_update,
         stale_after_hours=stale_after_hours,
     )
+
+
+@screen_app.command("ui")
+def screen_ui(
+    repo_root: Path = typer.Option(Path("."), "--repo-root"),
+    port: int = typer.Option(8501, "--port"),
+    run_id: Optional[str] = typer.Option(None, "--run"),
+) -> None:
+    """Launch the shared Streamlit app on the results page. Requires the optional ui extra."""
+
+    launch_shared_ui(repo_root=repo_root, port=port, page="results", run_id=run_id)
 
 
 @vision_app.command("scan")
@@ -224,6 +266,18 @@ def vision_scan(
         None,
         "--max-candidates",
         help="Optional cap for smoke tests. Applied after eligibility, before freeze.",
+    ),
+    tickers: Optional[list[str]] = typer.Option(
+        None,
+        "--ticker",
+        "-t",
+        help="Screen only these tickers. Repeat the flag or pass a comma-separated list.",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Print every verdict and the model's reason, including no_match, uncertain, and names that never reached the model.",
     ),
     timeout_seconds: float = typer.Option(60.0, "--timeout-seconds"),
     batch_size: int = typer.Option(10, "--batch-size"),
@@ -248,12 +302,49 @@ def vision_scan(
         dry_run=dry_run,
         demo=demo,
         max_candidates=max_candidates,
+        tickers=tickers,
+        verbose=verbose,
         timeout_seconds=timeout_seconds,
         batch_size=batch_size,
         max_output_tokens=max_output_tokens,
         skip_update=skip_update,
         stale_after_hours=stale_after_hours,
     )
+
+
+def _print_verdicts(services, run_id: str, *, tickers: tuple[str, ...], verbose: bool) -> None:
+    """Print model reasons. A ticker-scoped run always prints those names; --verbose prints the whole run."""
+
+    wanted = set(tickers)
+    rows = list(services.store.list_candidate_results(run_id))
+    shown = [row for row in rows if verbose or row.ticker in wanted]
+    shown.sort(key=lambda row: (row.ticker, row.candidate_id))
+    if not shown:
+        missing = ", ".join(tickers) if tickers else "the run"
+        print(f"[yellow]No stored result for {escape(missing)}[/yellow]")
+        return
+    for row in shown:
+        if row.status != "completed" or not row.assessments:
+            message = row.error.message if row.error is not None else row.status
+            print(f"[yellow]{escape(row.ticker)}[/yellow] {row.status}: {escape(message)}")
+            continue
+        for assessment in row.assessments:
+            color = {"match": "green", "no_match": "red", "uncertain": "yellow"}.get(assessment.verdict, "white")
+            strength = ""
+            if assessment.match_strength is not None:
+                strength = f" strength={assessment.match_strength}"
+            print(
+                f"[{color}]{escape(row.ticker)}[/{color}] {escape(assessment.setup_id)} "
+                f"[{color}]{assessment.verdict}[/{color}]{strength}"
+            )
+            if assessment.reason:
+                print(f"  {escape(assessment.reason)}")
+            if assessment.violated_required_rule_ids:
+                rules = ", ".join(assessment.violated_required_rule_ids)
+                print(f"  violated: {escape(rules)}")
+            if assessment.missing_evidence:
+                missing = ", ".join(assessment.missing_evidence)
+                print(f"  missing: {escape(missing)}")
 
 
 @vision_app.command("resume")
@@ -397,9 +488,11 @@ def _launch_ui(*, repo_root: Path, port: int, page: str, run_id: str | None) -> 
         raise typer.BadParameter("Streamlit is not installed. Run: pip install -e '.[ui]'") from e
 
     app_path = Path(__file__).resolve().parents[1] / "ui" / "app.py"
+    root = Path(repo_root).resolve()
     env = os.environ.copy()
-    env["NS_REPO_ROOT"] = str(Path(repo_root).resolve())
+    env["NS_REPO_ROOT"] = str(root)
     env["NS_VISION_PAGE"] = page
+    env["STREAMLIT_THEME_BASE"] = "dark"
     if run_id:
         env["NS_VISION_RUN_ID"] = run_id
     cmd = [
@@ -412,8 +505,10 @@ def _launch_ui(*, repo_root: Path, port: int, page: str, run_id: str | None) -> 
         str(int(port)),
         "--server.headless",
         "true",
+        "--theme.base",
+        "dark",
     ]
-    raise SystemExit(subprocess.call(cmd, env=env))
+    raise SystemExit(subprocess.call(cmd, env=env, cwd=str(root)))
 
 
 def _write_dicts(path: Path, rows: tuple[dict, ...]) -> None:

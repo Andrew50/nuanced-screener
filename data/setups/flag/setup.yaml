@@ -62,7 +62,7 @@ llm_notes: |
 filters:
   min_price: null
   min_dollar_vol_20d: null
-  min_adr_pct_20: null
+  min_adr_pct_20: 0.03
   min_market_cap: null
   max_market_cap: null
 chart:

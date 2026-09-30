@@ -157,6 +157,28 @@ def feature_caption(features: FeatureValue) -> str:
     )
 
 
+def result_list_label(row: CandidateRow) -> str:
+    """Sidebar label: ``PI - Bull Flag`` for each setup that matched."""
+
+    names = [badge.setup_name for badge in row.matched_setups if badge.setup_name]
+    if not names:
+        return row.ticker
+    return f"{row.ticker} - {', '.join(names)}"
+
+
+def miss_reason_line(row: CandidateRow) -> str:
+    """Model reasons for setups that were graded and did not match."""
+
+    parts: list[str] = []
+    for assessment in row.assessments:
+        if assessment.verdict == "match":
+            continue
+        verdict = assessment.verdict.replace("_", " ")
+        reason = f" — {assessment.reason}" if assessment.reason else ""
+        parts.append(f"{assessment.setup_name}: {verdict}{reason}")
+    return " · ".join(parts)
+
+
 def badge_text(row: CandidateRow) -> str:
     if not row.matched_setups:
         if row.status != "completed":

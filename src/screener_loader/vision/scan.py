@@ -107,6 +107,7 @@ class Scanner:
         self._usages: list[TokenUsage | None] = []
         self._attempts = 0
         self._stop_error: AttemptError | None = None
+        self.on_candidate: Callable[[str], None] | None = None
 
     def run(self, prepared: PreparedScan, *, cancel: CancelFlag | None = None) -> ScanOutcome:
         self._preflight(prepared)
@@ -183,6 +184,15 @@ class Scanner:
                     "Raise the cap or reduce eligible setups; splitting cannot help."
                 )
 
+    def _note_candidate(self, ticker: str) -> None:
+        hook = self.on_candidate
+        if hook is None:
+            return
+        try:
+            hook(str(ticker))
+        except Exception:
+            log.debug("candidate progress hook failed", exc_info=True)
+
     def _request_compiler(self, prepared: PreparedScan):
         from .prompts import SnapshotRequestCompiler
 
@@ -199,38 +209,52 @@ class Scanner:
         self._in_flight = 0
         dry = prepared.config.mode == "dry_run"
         synthetic = prepared.config.mode == "demo" or getattr(self.classifier, "provider", "") == "fake"
-        if dry:
-            self.store.update_status(run_id, "dry_run")
-
-        self._record_skips(run_id, prepared)
-        example_artifacts = self._prepare_references(run_id, prepared)
-
-        committed = {
-            r.candidate_id
-            for r in self.store.list_candidate_results(run_id)
-            if r.status in {"completed", "skipped"}
-        }
-        pending = [c for c in sort_candidates(prepared.candidates) if c.candidate_id not in committed]
-        if _cancelled(cancel):
-            return self._finalize(run_id, prepared, status="cancelled", synthetic=synthetic)
-
-        if not pending:
-            status = "dry_run" if dry else self._status_from_store(run_id, prepared)
-            return self._finalize(run_id, prepared, status=status, synthetic=synthetic)
-
+        self._open_chart_pool()
         try:
-            self._run_queue(run_id, prepared, pending, example_artifacts, cancel, dry=dry)
-        except _StopDispatch as stop:
-            self._stop_error = stop.error
-            log.info("stopping dispatch: %s", stop.error.kind)
+            if dry:
+                self.store.update_status(run_id, "dry_run")
 
-        if _cancelled(cancel):
-            status = "cancelled"
-        elif dry:
-            status = "dry_run"
-        else:
-            status = self._status_from_store(run_id, prepared)
-        return self._finalize(run_id, prepared, status=status, synthetic=synthetic)
+            self._record_skips(run_id, prepared)
+            example_artifacts = self._prepare_references(run_id, prepared)
+
+            committed = {
+                r.candidate_id
+                for r in self.store.list_candidate_results(run_id)
+                if r.status in {"completed", "skipped"}
+            }
+            pending = [c for c in sort_candidates(prepared.candidates) if c.candidate_id not in committed]
+            if _cancelled(cancel):
+                return self._finalize(run_id, prepared, status="cancelled", synthetic=synthetic)
+
+            if not pending:
+                status = "dry_run" if dry else self._status_from_store(run_id, prepared)
+                return self._finalize(run_id, prepared, status=status, synthetic=synthetic)
+
+            try:
+                self._run_queue(run_id, prepared, pending, example_artifacts, cancel, dry=dry)
+            except _StopDispatch as stop:
+                self._stop_error = stop.error
+                log.info("stopping dispatch: %s", stop.error.kind)
+
+            if _cancelled(cancel):
+                status = "cancelled"
+            elif dry:
+                status = "dry_run"
+            else:
+                status = self._status_from_store(run_id, prepared)
+            return self._finalize(run_id, prepared, status=status, synthetic=synthetic)
+        finally:
+            self._close_chart_pool()
+
+    def _open_chart_pool(self) -> None:
+        opener = getattr(self.renderer, "open", None)
+        if callable(opener):
+            opener()
+
+    def _close_chart_pool(self) -> None:
+        closer = getattr(self.renderer, "close", None)
+        if callable(closer):
+            closer()
 
     def _run_queue(
         self,
@@ -309,6 +333,9 @@ class Scanner:
         rendered: list[tuple[CandidateInput, ChartArtifact]] = []
         render_failures: list[CandidateResult] = []
         for cand in work:
+            if _cancelled(cancel):
+                return
+            self._note_candidate(cand.ticker)
             try:
                 art = self.renderer.render(
                     cand.window,

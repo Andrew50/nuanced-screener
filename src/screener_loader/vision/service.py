@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 import os
 
 from ..config import LoaderConfig
@@ -74,10 +74,11 @@ class VisionApp:
         compiler: Any | None = None,
         scan_root: Path | None = None,
         max_candidates: int | None = None,
+        tickers: Sequence[str] | None = None,
         api_key: str | None = None,
     ) -> None:
         self.loader = loader
-        self.source = SetupScanSource(loader, clock=clock, max_candidates=max_candidates)
+        self.source = SetupScanSource(loader, clock=clock, max_candidates=max_candidates, tickers=tickers)
         root = Path(scan_root) if scan_root is not None else default_scan_root(loader)
         root.mkdir(parents=True, exist_ok=True)
         self.scan_root = root
@@ -131,6 +132,7 @@ class VisionApp:
         *,
         cancel: CancelFlag | None = None,
         on_run_created: Callable[[str], None] | None = None,
+        on_candidate: Callable[[str], None] | None = None,
     ) -> ScanOutcome:
         if config.mode == "live" and self._classifier_override is None:
             require_explicit_live_model(config.model)
@@ -140,9 +142,14 @@ class VisionApp:
                     "OPENAI_API_KEY is missing; refusing to invent results. "
                     "Use --dry-run or --demo for offline checks."
                 )
+        if cancel is not None and cancel.is_set():
+            raise VisionError("Scan cancelled")
         prepared = self.prepare(config)
+        if cancel is not None and cancel.is_set():
+            raise VisionError("Scan cancelled")
         scanner = self.scanner_for(config, prepared=prepared)
         self._bind_run_created(scanner, on_run_created)
+        self._bind_candidate(scanner, on_candidate)
         return scanner.run(prepared, cancel=cancel)
 
     def resume(
@@ -152,12 +159,16 @@ class VisionApp:
         *,
         cancel: CancelFlag | None = None,
         on_run_created: Callable[[str], None] | None = None,
+        on_candidate: Callable[[str], None] | None = None,
     ) -> ScanOutcome:
         if on_run_created is not None:
             on_run_created(str(run_id))
+        if cancel is not None and cancel.is_set():
+            raise VisionError("Scan cancelled")
         frozen = self.store.load_frozen_inputs(run_id)
         scanner = self.scanner_for(frozen.config, prepared=frozen)
         self._bind_run_created(scanner, on_run_created)
+        self._bind_candidate(scanner, on_candidate)
         return scanner.resume(run_id, prepared, cancel=cancel)
 
     @staticmethod
@@ -172,3 +183,9 @@ class VisionApp:
             return stored
 
         scanner.store.create_run = create_run  # type: ignore[method-assign]
+
+    @staticmethod
+    def _bind_candidate(scanner: Any, on_candidate: Callable[[str], None] | None) -> None:
+        if on_candidate is None:
+            return
+        scanner.on_candidate = on_candidate

@@ -335,7 +335,7 @@ def test_vision_protocol_fakes_do_not_import_unfinished_siblings() -> None:
     page = FakeResultReader(store).query(ResultQuery(run_id=run.run_id, page=PageRequest(page=1, page_size=10)))
     assert page.has_prev is False
     cfg = ScanConfig(model="gpt-4.1-2025-04-14")
-    assert cfg.batch_size == 10 and cfg.max_concurrency == 2
+    assert cfg.batch_size == 10 and cfg.max_concurrency == 16
 
 
 def test_vision_semantic_vs_raw_digest_resume_role() -> None:

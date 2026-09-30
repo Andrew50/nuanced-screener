@@ -11,6 +11,8 @@ from screener_loader.vision_ui.components import (
     STATE_PREFIX,
     VIEW_MATCHES,
     badge_text,
+    miss_reason_line,
+    result_list_label,
     build_result_query,
     feature_caption,
     format_adr_pct,
@@ -42,6 +44,32 @@ def test_adr_display_and_query_builder() -> None:
     assert statuses == ()
     _q2, err_statuses = build_result_query(run_id="run-1", view="errors")
     assert err_statuses == ("error", "skipped")
+
+
+def test_result_list_label_and_miss_reasons() -> None:
+    from types import SimpleNamespace
+
+    hit = SimpleNamespace(
+        ticker="PI",
+        matched_setups=(
+            SimpleNamespace(setup_name="Bull Flag"),
+            SimpleNamespace(setup_name="Episodic Pivot"),
+        ),
+    )
+    assert result_list_label(hit) == "PI - Bull Flag, Episodic Pivot"
+    miss = SimpleNamespace(
+        ticker="XYZ",
+        matched_setups=(),
+        assessments=(
+            SimpleNamespace(verdict="no_match", setup_name="Bull Flag", reason="No pole."),
+            SimpleNamespace(verdict="uncertain", setup_name="Episodic Pivot", reason="Right edge is clipped."),
+            SimpleNamespace(verdict="match", setup_name="Ignored", reason="Held."),
+        ),
+    )
+    assert result_list_label(miss) == "XYZ"
+    assert miss_reason_line(miss) == (
+        "Bull Flag: no match — No pole. · Episodic Pivot: uncertain — Right edge is clipped."
+    )
 
 
 def test_selection_reconciliation_rule() -> None:
@@ -85,7 +113,7 @@ def test_demo_page_and_real_store_without_classifier(tmp_path: Path, monkeypatch
     assert not any(b.label in {"Prev page", "Next page"} for b in at.button)
     assert not any(getattr(e, "label", None) == "Export" for e in at.expander)
     assert any(getattr(e, "label", None) == "Filters" for e in at.expander)
-    assert any(b.label in {"AAPL", "AAA", "MSFT", "NVDA"} for b in at.button)
+    assert any(b.label.startswith(("AAPL - ", "AAA - ", "MSFT - ", "NVDA - ")) for b in at.button)
     assert not any("Frozen" in str(getattr(e, "label", "") or "") for e in at.expander)
     assert any(b.label == "Save" for b in at.button)
     assert store.list_runs()

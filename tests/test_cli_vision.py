@@ -29,6 +29,12 @@ def test_base_help_lists_vision_without_optional_extras() -> None:
     assert screen.exit_code == 0, screen.output
     assert "--dry-run" in screen.output
     assert "--skip-update" in screen.output
+    assert "--ticker" in screen.output
+    assert "--verbose" in screen.output
+    assert "ui" in screen.output
+    screen_ui = runner.invoke(app, ["screen", "ui", "--help"])
+    assert screen_ui.exit_code == 0, screen_ui.output
+    assert "--port" in screen_ui.output
     query = runner.invoke(app, ["query", "--help"])
     assert query.exit_code == 0, query.output
     assert "--query" in query.output
@@ -41,6 +47,8 @@ def test_base_help_lists_vision_without_optional_extras() -> None:
     assert "--dry-run" in scan.output
     assert "--demo" in scan.output
     assert "--max-candidates" in scan.output
+    assert "--ticker" in scan.output
+    assert "--verbose" in scan.output
 
 
 def test_vision_scan_live_requires_model(tmp_path: Path) -> None:
